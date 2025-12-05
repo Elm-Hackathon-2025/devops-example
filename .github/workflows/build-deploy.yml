@@ -97,35 +97,36 @@ jobs:
             export REPO_NAME=${{ env.REPO_NAME }}
             export IMAGE_TAG=$IMAGE_TAG
             
-            # Get list of services
-            SERVICES=$(docker compose -f ${{ steps.build-method.outputs.file }} config --services)
-            echo "::notice::Available services: $SERVICES"
-            
-            # Try to build 'app' service first, otherwise build the first service
-            if echo "$SERVICES" | grep -q "^app$"; then
-              echo "::notice::Building 'app' service..."
-              docker compose -f ${{ steps.build-method.outputs.file }} build app
-            else
-              FIRST_SERVICE=$(echo "$SERVICES" | head -n1)
-              echo "::notice::Building '$FIRST_SERVICE' service..."
-              docker compose -f ${{ steps.build-method.outputs.file }} build $FIRST_SERVICE
-            fi
-            
-            # Get the built image name
-            COMPOSE_IMAGE=$(docker compose -f ${{ steps.build-method.outputs.file }} config | grep 'image:' | head -n1 | awk '{print $2}')
-            
-            if [ -z "$COMPOSE_IMAGE" ]; then
-              # If no image name in compose, use the service name
-              if echo "$SERVICES" | grep -q "^app$"; then
-                SERVICE_NAME="app"
-              else
-                SERVICE_NAME=$(echo "$SERVICES" | head -n1)
+            # Get list of services that have a build section (exclude image-only services)
+            echo "::notice::Detecting buildable services from compose file..."
+            BUILDABLE_SERVICES=$(docker compose -f ${{ steps.build-method.outputs.file }} config --services | while read service; do
+              if docker compose -f ${{ steps.build-method.outputs.file }} config | grep -A 10 "^  $service:" | grep -q "build:"; then
+                echo "$service"
               fi
-              COMPOSE_IMAGE="${PWD##*/}_${SERVICE_NAME}"
-              echo "::notice::No image tag found in compose file, using default: $COMPOSE_IMAGE"
+            done)
+            
+            echo "::notice::Buildable services: $BUILDABLE_SERVICES"
+            
+            # Determine which service to build
+            if echo "$BUILDABLE_SERVICES" | grep -q "^app$"; then
+              BUILD_SERVICE="app"
+            else
+              BUILD_SERVICE=$(echo "$BUILDABLE_SERVICES" | head -n1)
             fi
             
-            echo "::notice::Tagging image from docker compose: $COMPOSE_IMAGE"
+            if [ -z "$BUILD_SERVICE" ]; then
+              echo "::error::No buildable service found in docker-compose file"
+              exit 1
+            fi
+            
+            echo "::notice::Building service: $BUILD_SERVICE"
+            docker compose -f ${{ steps.build-method.outputs.file }} build $BUILD_SERVICE
+            
+            # Get the built image name (tag it with the compose project name + service name)
+            COMPOSE_PROJECT="${PWD##*/}"
+            COMPOSE_IMAGE="${COMPOSE_PROJECT}-${BUILD_SERVICE}"
+            
+            echo "::notice::Tagging image: $COMPOSE_IMAGE"
             docker tag $COMPOSE_IMAGE $IMAGE_TAG
             docker tag $COMPOSE_IMAGE $IMAGE_TAG_REPO
             docker tag $COMPOSE_IMAGE $IMAGE_TAG_SHA
