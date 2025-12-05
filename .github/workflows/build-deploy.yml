@@ -48,10 +48,37 @@ jobs:
       - name: Set ECR repository name
         id: ecr-repo
         run: |
-          # ECR repository format: hackathon-{team_name}
-          ECR_REPO="hackathon-${{ env.TEAM_NAME }}"
+          # ECR repository format: hackathon-{team_name}-{repo_name}
+          # This ensures each service has its own ECR repository
+          ECR_REPO="hackathon-${{ env.TEAM_NAME }}-${{ env.REPO_NAME }}"
           echo "repository=$ECR_REPO" >> $GITHUB_OUTPUT
           echo "::notice::ECR Repository: $ECR_REPO"
+
+      - name: Ensure ECR Repository Exists
+        run: |
+          ECR_REPO="${{ steps.ecr-repo.outputs.repository }}"
+          
+          if ! aws ecr describe-repositories --repository-names $ECR_REPO --region ${{ env.AWS_REGION }} >/dev/null 2>&1; then
+            echo "::notice::Creating ECR repository: $ECR_REPO"
+            aws ecr create-repository \
+              --repository-name $ECR_REPO \
+              --image-scanning-configuration scanOnPush=true \
+              --region ${{ env.AWS_REGION }}
+          else
+            echo "::notice::ECR repository already exists: $ECR_REPO"
+          fi
+
+      - name: Ensure CloudWatch Log Group Exists
+        run: |
+          LOG_GROUP="/ecs/hackathon/${{ env.TEAM_NAME }}/${{ env.REPO_NAME }}"
+          
+          if ! aws logs describe-log-groups --log-group-name-prefix "$LOG_GROUP" --region ${{ env.AWS_REGION }} | grep -q "$LOG_GROUP"; then
+            echo "::notice::Creating log group: $LOG_GROUP"
+            aws logs create-log-group --log-group-name "$LOG_GROUP" --region ${{ env.AWS_REGION }}
+            aws logs put-retention-policy --log-group-name "$LOG_GROUP" --retention-in-days 7 --region ${{ env.AWS_REGION }}
+          else
+            echo "::notice::Log group already exists: $LOG_GROUP"
+          fi
 
       - name: Detect build method
         id: build-method
@@ -166,8 +193,9 @@ jobs:
       - name: Set ECS service details
         id: ecs-service
         run: |
-          # ECS service format: hackathon-{team_name}
-          ECS_SERVICE="hackathon-${{ env.TEAM_NAME }}"
+          # ECS service format: hackathon-{team_name}-{repo_name}
+          # This ensures each service has its own ECS service
+          ECS_SERVICE="hackathon-${{ env.TEAM_NAME }}-${{ env.REPO_NAME }}"
           ECS_CLUSTER="hackathon-cluster"
           echo "service=$ECS_SERVICE" >> $GITHUB_OUTPUT
           echo "cluster=$ECS_CLUSTER" >> $GITHUB_OUTPUT
@@ -191,8 +219,101 @@ jobs:
             echo "::notice::ECS service exists"
           else
             echo "exists=false" >> $GITHUB_OUTPUT
-            echo "::warning::ECS service does not exist"
+            echo "::warning::ECS service does not exist, will create it"
           fi
+
+      - name: Create ECS Task Definition and Service
+        if: steps.check-ecs.outputs.exists == 'false'
+        run: |
+          TASK_FAMILY="hackathon-${{ env.TEAM_NAME }}-${{ env.REPO_NAME }}"
+          SERVICE_NAME="${{ steps.ecs-service.outputs.service }}"
+          CLUSTER_NAME="${{ steps.ecs-service.outputs.cluster }}"
+          
+          echo "::notice::Creating task definition: $TASK_FAMILY"
+          
+          # Create task definition
+          cat > task-definition.json <<EOF
+          {
+            "family": "$TASK_FAMILY",
+            "networkMode": "awsvpc",
+            "requiresCompatibilities": ["FARGATE"],
+            "cpu": "256",
+            "memory": "512",
+            "executionRoleArn": "arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/hackathon-ecs-execution-role",
+            "taskRoleArn": "arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/hackathon-ecs-task-role",
+            "containerDefinitions": [
+              {
+                "name": "${{ env.REPO_NAME }}",
+                "image": "${{ env.image_tag }}",
+                "portMappings": [
+                  {
+                    "containerPort": 3000,
+                    "protocol": "tcp"
+                  }
+                ],
+                "environment": [
+                  {"name": "NODE_ENV", "value": "production"},
+                  {"name": "TEAM_NAME", "value": "${{ env.TEAM_NAME }}"},
+                  {"name": "REPO_NAME", "value": "${{ env.REPO_NAME }}"},
+                  {"name": "PORT", "value": "3000"}
+                ],
+                "logConfiguration": {
+                  "logDriver": "awslogs",
+                  "options": {
+                    "awslogs-group": "/ecs/hackathon/${{ env.TEAM_NAME }}/${{ env.REPO_NAME }}",
+                    "awslogs-region": "${{ env.AWS_REGION }}",
+                    "awslogs-stream-prefix": "ecs"
+                  }
+                },
+                "healthCheck": {
+                  "command": ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3000/health || exit 1"],
+                  "interval": 30,
+                  "timeout": 5,
+                  "retries": 3,
+                  "startPeriod": 60
+                }
+              }
+            ]
+          }
+          EOF
+          
+          # Register task definition
+          TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://task-definition.json \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+          
+          echo "::notice::Task definition created: $TASK_DEF_ARN"
+          
+          # Get network configuration from template service
+          echo "::notice::Getting network configuration from hackathon-expo-1st"
+          NETWORK_CONFIG=$(aws ecs describe-services \
+            --cluster $CLUSTER_NAME \
+            --services hackathon-expo-1st \
+            --region ${{ env.AWS_REGION }} \
+            --query 'services[0].networkConfiguration.awsvpcConfiguration' \
+            --output json)
+          
+          SUBNET_IDS=$(echo $NETWORK_CONFIG | jq -r '.subnets | join(",")')
+          SECURITY_GROUP_ID=$(echo $NETWORK_CONFIG | jq -r '.securityGroups[0]')
+          
+          echo "::notice::Creating ECS service: $SERVICE_NAME"
+          echo "::notice::Using subnets: $SUBNET_IDS"
+          echo "::notice::Using security group: $SECURITY_GROUP_ID"
+          
+          # Create ECS service
+          aws ecs create-service \
+            --cluster $CLUSTER_NAME \
+            --service-name $SERVICE_NAME \
+            --task-definition $TASK_FAMILY \
+            --desired-count 1 \
+            --launch-type FARGATE \
+            --platform-version LATEST \
+            --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_IDS],securityGroups=[$SECURITY_GROUP_ID],assignPublicIp=ENABLED}" \
+            --enable-execute-command \
+            --region ${{ env.AWS_REGION }}
+          
+          echo "::notice::Service created successfully!"
 
       - name: Force new deployment
         if: steps.check-ecs.outputs.exists == 'true'
@@ -205,7 +326,6 @@ jobs:
             --region ${{ env.AWS_REGION }}
 
       - name: Wait for service stability
-        if: steps.check-ecs.outputs.exists == 'true'
         run: |
           echo "::notice::Waiting for service to stabilize (this may take several minutes)..."
           aws ecs wait services-stable \
@@ -215,7 +335,6 @@ jobs:
           echo "::notice::Service is stable"
 
       - name: Get service status
-        if: steps.check-ecs.outputs.exists == 'true'
         run: |
           echo "::group::Service Status"
           aws ecs describe-services \
@@ -227,7 +346,6 @@ jobs:
           echo "::endgroup::"
 
       - name: Get task details
-        if: steps.check-ecs.outputs.exists == 'true'
         run: |
           echo "::group::Recent Tasks"
           TASK_ARNS=$(aws ecs list-tasks \
@@ -283,11 +401,3 @@ jobs:
           else
             echo "::error::❌ Deployment failed for ${{ env.TEAM_NAME }}/${{ env.REPO_NAME }}"
           fi
-
-      - name: Service not found warning
-        if: steps.check-ecs.outputs.exists == 'false'
-        run: |
-          echo "::warning::ECS service '${{ steps.ecs-service.outputs.service }}' not found in cluster '${{ steps.ecs-service.outputs.cluster }}'"
-          echo "::warning::The Docker image has been built and pushed to ECR, but no ECS service exists yet."
-          echo "::warning::Please ensure the CDK stack has been deployed first to create the ECS service."
-          echo "::notice::Image available at: ${{ env.image_tag }}"

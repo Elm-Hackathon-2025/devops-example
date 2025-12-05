@@ -10,17 +10,10 @@ Configure these secrets at: `https://github.com/organizations/Elm-Hackathon-2025
 - **Description**: AWS IAM access key ID for ECR and ECS access
 - **Value**: Your AWS access key ID (e.g., `AKIAIOSFODNN7EXAMPLE`)
 - **Permissions Required**:
-  - `ecr:GetAuthorizationToken`
-  - `ecr:BatchCheckLayerAvailability`
-  - `ecr:GetDownloadUrlForLayer`
-  - `ecr:PutImage`
-  - `ecr:InitiateLayerUpload`
-  - `ecr:UploadLayerPart`
-  - `ecr:CompleteLayerUpload`
-  - `ecs:DescribeServices`
-  - `ecs:UpdateService`
-  - `ecs:DescribeTasks`
-  - `ecs:ListTasks`
+  - **ECR**: `GetAuthorizationToken`, `CreateRepository`, `DescribeRepositories`, `BatchCheckLayerAvailability`, `GetDownloadUrlForLayer`, `PutImage`, `InitiateLayerUpload`, `UploadLayerPart`, `CompleteLayerUpload`, `PutImageScanningConfiguration`
+  - **CloudWatch Logs**: `CreateLogGroup`, `DescribeLogGroups`, `PutRetentionPolicy`
+  - **ECS**: `RegisterTaskDefinition`, `DescribeTaskDefinition`, `CreateService`, `UpdateService`, `DescribeServices`, `ListTasks`, `DescribeTasks`
+  - **IAM**: `PassRole` (for ECS task execution roles)
 
 ### 2. AWS_SECRET_ACCESS_KEY
 - **Description**: AWS IAM secret access key corresponding to the access key ID
@@ -56,13 +49,14 @@ After adding secrets, verify they're available in any repository:
 
 ## IAM Policy Example
 
-Here's a minimal IAM policy for the AWS credentials:
+Here's the complete IAM policy for the AWS credentials (GitHubActionsECSDeployPolicy):
 
 ```json
 {
   "Version": "2012-10-17",
   "Statement": [
     {
+      "Sid": "ECRAuthorizationToken",
       "Effect": "Allow",
       "Action": [
         "ecr:GetAuthorizationToken"
@@ -70,24 +64,51 @@ Here's a minimal IAM policy for the AWS credentials:
       "Resource": "*"
     },
     {
+      "Sid": "ECRRepositoryManagement",
       "Effect": "Allow",
       "Action": [
+        "ecr:CreateRepository",
+        "ecr:DescribeRepositories",
         "ecr:BatchCheckLayerAvailability",
         "ecr:GetDownloadUrlForLayer",
         "ecr:PutImage",
         "ecr:InitiateLayerUpload",
         "ecr:UploadLayerPart",
-        "ecr:CompleteLayerUpload"
+        "ecr:CompleteLayerUpload",
+        "ecr:PutImageScanningConfiguration"
       ],
       "Resource": "arn:aws:ecr:ap-southeast-1:060795935816:repository/hackathon-*"
     },
     {
+      "Sid": "CloudWatchLogsManagement",
       "Effect": "Allow",
       "Action": [
-        "ecs:DescribeServices",
+        "logs:CreateLogGroup",
+        "logs:DescribeLogGroups",
+        "logs:PutRetentionPolicy"
+      ],
+      "Resource": "arn:aws:logs:ap-southeast-1:060795935816:log-group:/ecs/hackathon*"
+    },
+    {
+      "Sid": "ECSTaskDefinitionManagement",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:RegisterTaskDefinition",
+        "ecs:DescribeTaskDefinition",
+        "ecs:DeregisterTaskDefinition"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ECSServiceManagement",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:CreateService",
         "ecs:UpdateService",
-        "ecs:DescribeTasks",
-        "ecs:ListTasks"
+        "ecs:DescribeServices",
+        "ecs:DeleteService",
+        "ecs:ListTasks",
+        "ecs:DescribeTasks"
       ],
       "Resource": [
         "arn:aws:ecs:ap-southeast-1:060795935816:service/hackathon-cluster/*",
@@ -95,15 +116,28 @@ Here's a minimal IAM policy for the AWS credentials:
       ]
     },
     {
+      "Sid": "IAMPassRole",
       "Effect": "Allow",
       "Action": [
-        "ecs:DescribeTaskDefinition"
+        "iam:PassRole"
       ],
-      "Resource": "*"
+      "Resource": [
+        "arn:aws:iam::060795935816:role/ecsTaskExecutionRole",
+        "arn:aws:iam::060795935816:role/ecsTaskRole"
+      ]
     }
   ]
 }
 ```
+
+### Required Permissions Explained
+
+- **ECR**: Create repositories, push images, scan images
+- **CloudWatch Logs**: Create log groups for ECS services
+- **ECS**: Register task definitions, create/update services, describe tasks
+- **IAM**: Pass roles to ECS tasks (required for task execution)
+
+
 
 ## Security Best Practices
 
