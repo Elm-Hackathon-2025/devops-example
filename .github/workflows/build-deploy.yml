@@ -99,8 +99,24 @@ jobs:
           echo "::notice::Found $SERVICE_COUNT service(s) to build and deploy"
           
           for i in $(seq 0 $((SERVICE_COUNT - 1))); do
-            SERVICE_NAME=$(echo $SERVICES | jq -r ".[$i]")
-            echo "::group::Building service: $SERVICE_NAME"
+            COMPOSE_SERVICE_NAME=$(echo $SERVICES | jq -r ".[$i]")
+            echo "::group::Processing compose service: $COMPOSE_SERVICE_NAME"
+            
+            # Extract SERVICE_NAME from docker-compose environment variables
+            # This is the actual service identifier (e.g., test-api, test-frontend)
+            SERVICE_NAME=$(docker compose -f ${{ steps.detect-services.outputs.file }} config | \
+              grep -A 20 "^  $COMPOSE_SERVICE_NAME:" | \
+              grep "SERVICE_NAME:" | \
+              sed 's/.*SERVICE_NAME:-\([^}]*\).*/\1/' | \
+              head -1)
+            
+            # If no SERVICE_NAME env var found, use compose service name
+            if [ -z "$SERVICE_NAME" ]; then
+              SERVICE_NAME="$COMPOSE_SERVICE_NAME"
+            fi
+            
+            echo "::notice::Compose service: $COMPOSE_SERVICE_NAME"
+            echo "::notice::Deployment service name: $SERVICE_NAME"
             
             # ECR repository format: hackathon-{team_name}-{service_name}
             ECR_REPO="hackathon-${{ env.TEAM_NAME }}-$SERVICE_NAME"
@@ -138,11 +154,11 @@ jobs:
             # Build based on method
             if [ "$BUILD_METHOD" == "compose" ]; then
               echo "::notice::Building with docker compose..."
-              docker compose -f ${{ steps.detect-services.outputs.file }} build $SERVICE_NAME
+              docker compose -f ${{ steps.detect-services.outputs.file }} build $COMPOSE_SERVICE_NAME
               
               # Get the built image name
               COMPOSE_PROJECT="${PWD##*/}"
-              COMPOSE_IMAGE="${COMPOSE_PROJECT}-${SERVICE_NAME}"
+              COMPOSE_IMAGE="${COMPOSE_PROJECT}-${COMPOSE_SERVICE_NAME}"
               
               echo "::notice::Tagging image: $COMPOSE_IMAGE -> $IMAGE_TAG"
               docker tag $COMPOSE_IMAGE $IMAGE_TAG
