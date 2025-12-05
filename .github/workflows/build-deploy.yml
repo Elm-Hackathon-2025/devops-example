@@ -201,14 +201,25 @@ jobs:
             
             # Extract container port from docker-compose
             if [ "$BUILD_METHOD" == "compose" ]; then
+              # Try to extract port from docker compose config
+              # First try the expanded format (target: 8080)
               CONTAINER_PORT=$(docker compose -f ${{ steps.detect-services.outputs.file }} config 2>/dev/null | \
-                grep -A 20 "  $COMPOSE_SERVICE_NAME:" | \
-                grep -E "^\s+- \"[0-9]+:[0-9]+\"" | \
+                grep -A 30 "  $COMPOSE_SERVICE_NAME:" | \
+                grep -E "^\s+target:\s+[0-9]+" | \
                 head -1 | \
-                grep -oE '[0-9]+:[0-9]+' | \
-                cut -d':' -f2)
+                grep -oE '[0-9]+')
               
-              # If no port found, default to 3000
+              # If not found, try the short format ("8080:8080")
+              if [ -z "$CONTAINER_PORT" ]; then
+                CONTAINER_PORT=$(docker compose -f ${{ steps.detect-services.outputs.file }} config 2>/dev/null | \
+                  grep -A 30 "  $COMPOSE_SERVICE_NAME:" | \
+                  grep -E "^\s+- \"[0-9]+:[0-9]+\"" | \
+                  head -1 | \
+                  grep -oE '[0-9]+:[0-9]+' | \
+                  cut -d':' -f2)
+              fi
+              
+              # If still no port found, default to 3000
               if [ -z "$CONTAINER_PORT" ]; then
                 CONTAINER_PORT=3000
               fi
