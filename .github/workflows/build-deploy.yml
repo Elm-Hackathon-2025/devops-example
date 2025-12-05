@@ -235,8 +235,12 @@ jobs:
           echo "ECS Cluster: ${{ steps.ecs-service.outputs.cluster }}"
           echo "ECS Service: ${{ steps.ecs-service.outputs.service }}"
           echo "================================================"
-          echo "Primary URL: https://${{ env.TEAM_NAME }}.bp.elmhakathon.com"
-          echo "Service URL: https://${{ env.REPO_NAME }}.${{ env.TEAM_NAME }}.bp.elmhakathon.com"
+          echo "URLs:"
+          echo "  🌐 Team Base URL:    https://${{ env.TEAM_NAME }}.bp.elmhakathon.com"
+          echo "  🎯 Service URL:      https://${{ env.REPO_NAME }}.${{ env.TEAM_NAME }}.bp.elmhakathon.com"
+          echo ""
+          echo "Note: Each service is accessible via its own subdomain"
+          echo "      (e.g., api.expo-1st.bp.elmhakathon.com, frontend.expo-1st.bp.elmhakathon.com)"
           echo "================================================"
           echo "Image Tags:"
           echo "  - latest"
@@ -247,7 +251,8 @@ jobs:
           
           if [ "${{ job.status }}" == "success" ]; then
             echo "::notice::✅ Deployment successful for ${{ env.TEAM_NAME }}/${{ env.REPO_NAME }}"
-            echo "::notice::🔗 Access at: https://${{ env.REPO_NAME }}.${{ env.TEAM_NAME }}.bp.elmhakathon.com"
+            echo "::notice::🌐 Team Base: https://${{ env.TEAM_NAME }}.bp.elmhakathon.com"
+            echo "::notice::🎯 Service URL: https://${{ env.REPO_NAME }}.${{ env.TEAM_NAME }}.bp.elmhakathon.com"
           else
             echo "::error::❌ Deployment failed for ${{ env.TEAM_NAME }}/${{ env.REPO_NAME }}"
           fi

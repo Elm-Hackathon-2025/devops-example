@@ -42,7 +42,9 @@ github_repo_name: api
 This will:
 - Build and push to ECR: `hackathon-expo-1st:api-latest`
 - Deploy to ECS service: `hackathon-expo-1st`
-- Make accessible at: `https://api.expo-1st.bp.elmhakathon.com`
+- Make accessible at:
+  - **Service URL**: `https://api.expo-1st.bp.elmhakathon.com` (recommended)
+  - **Team Base URL**: `https://expo-1st.bp.elmhakathon.com`
 
 ### Auto Trigger
 
@@ -69,8 +71,13 @@ Each build creates 3 tags:
 - **Cluster**: `hackathon-cluster`
 
 ### URL Patterns
-- Primary: `https://{team_name}.bp.elmhakathon.com`
-- Service-specific: `https://{repo_name}.{team_name}.bp.elmhakathon.com`
+- **Team Base**: `https://{team_name}.bp.elmhakathon.com`
+  - Example: `https://expo-1st.bp.elmhakathon.com`
+- **Service-specific** (recommended): `https://{repo_name}.{team_name}.bp.elmhakathon.com`
+  - Example: `https://api.expo-1st.bp.elmhakathon.com`
+  - Example: `https://frontend.expo-1st.bp.elmhakathon.com`
+
+**Note**: Each service deployed by a team should use its own subdomain (e.g., `api.expo-1st`, `frontend.expo-1st`) to allow multiple services to run independently.
 
 ## Team Names Reference
 
@@ -104,21 +111,27 @@ bpo
 team_name: expo-1st
 github_repo_name: api
 ```
-→ Deploys to: `https://api.expo-1st.bp.elmhakathon.com`
+→ Deploys to:
+- **Service URL**: `https://api.expo-1st.bp.elmhakathon.com` ✅
+- Team Base: `https://expo-1st.bp.elmhakathon.com`
 
 ### Deploy Frontend for Heros
 ```yaml
 team_name: heros
 github_repo_name: frontend
 ```
-→ Deploys to: `https://frontend.heros.bp.elmhakathon.com`
+→ Deploys to:
+- **Service URL**: `https://frontend.heros.bp.elmhakathon.com` ✅
+- Team Base: `https://heros.bp.elmhakathon.com`
 
 ### Deploy Mobile App for Rollingstars
 ```yaml
 team_name: rollingstars
 github_repo_name: mobile
 ```
-→ Deploys to: `https://mobile.rollingstars.bp.elmhakathon.com`
+→ Deploys to:
+- **Service URL**: `https://mobile.rollingstars.bp.elmhakathon.com` ✅
+- Team Base: `https://rollingstars.bp.elmhakathon.com`
 
 ## Workflow Steps Explained
 
@@ -218,32 +231,36 @@ aws ecs update-service \
 
 ## Multi-Service Deployment
 
-To deploy multiple services for one team, run the workflow multiple times:
+Teams can deploy multiple services, each accessible via its own subdomain:
 
 **Step 1: Deploy API**
 ```yaml
 team_name: expo-1st
 github_repo_name: api
 ```
+→ Accessible at: `https://api.expo-1st.bp.elmhakathon.com` ✅
 
 **Step 2: Deploy Frontend**
 ```yaml
 team_name: expo-1st
 github_repo_name: frontend
 ```
+→ Accessible at: `https://frontend.expo-1st.bp.elmhakathon.com` ✅
 
 **Step 3: Deploy Backend**
 ```yaml
 team_name: expo-1st
 github_repo_name: backend
 ```
+→ Accessible at: `https://backend.expo-1st.bp.elmhakathon.com` ✅
 
-**Result:**
-- `https://api.expo-1st.bp.elmhakathon.com`
-- `https://frontend.expo-1st.bp.elmhakathon.com`
-- `https://backend.expo-1st.bp.elmhakathon.com`
+**Result - Multiple Services:**
+- API: `https://api.expo-1st.bp.elmhakathon.com`
+- Frontend: `https://frontend.expo-1st.bp.elmhakathon.com`
+- Backend: `https://backend.expo-1st.bp.elmhakathon.com`
+- Team Base: `https://expo-1st.bp.elmhakathon.com`
 
-**Note**: Currently, each team has one ECS service. For multiple services, you'll need to update the CDK stack to create separate ECS services per repo, or configure the single service to handle multiple containers.
+**Note**: Each service (api, frontend, backend) gets its own subdomain, allowing teams to run multiple independent services.
 
 ## Advanced Configuration
 
