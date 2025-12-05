@@ -79,22 +79,22 @@ All 19 teams (in kebab-case):
 expo-1st
 heros
 rollingstars
-automind-squad
 elm-tech
-dreamers
-khawarizmi
-phoenix
-code-masters
-webdev-wizards
-atlas
-innovators
-futurists
-tech-pioneers
-cyber-squad
-dev-ninjas
-code-craft
-tech-titans
-digital-dreamers
+itjehaat-sooq
+supernovas
+automind-squad
+naqliyat
+agent-x
+product-boosters
+altahateeh
+sema-lab
+logisty
+smart
+marzas
+qimmah
+huic-team
+elm-product
+bpo
 ```
 
 ## Examples
