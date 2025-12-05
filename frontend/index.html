@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hackathon Frontend</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            color: white;
+        }
+        .container {
+            text-align: center;
+            padding: 2rem;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 20px;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.37);
+            max-width: 600px;
+        }
+        h1 {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+        .info {
+            background: rgba(255, 255, 255, 0.2);
+            padding: 1.5rem;
+            border-radius: 10px;
+            margin: 1.5rem 0;
+        }
+        .info p {
+            margin: 0.5rem 0;
+            font-size: 1.1rem;
+        }
+        .badge {
+            display: inline-block;
+            background: rgba(255, 255, 255, 0.3);
+            padding: 0.5rem 1rem;
+            border-radius: 20px;
+            margin: 0.5rem;
+            font-weight: bold;
+        }
+        .api-link {
+            margin-top: 2rem;
+            padding: 1rem;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+        }
+        .api-link a {
+            color: #ffd700;
+            text-decoration: none;
+            font-weight: bold;
+            font-size: 1.1rem;
+        }
+        .api-link a:hover {
+            text-decoration: underline;
+        }
+        #api-status {
+            margin-top: 1rem;
+            padding: 1rem;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 8px;
+            font-family: monospace;
+            text-align: left;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 Hackathon Frontend</h1>
+        
+        <div class="info">
+            <p><strong>Team:</strong> <span class="badge" id="team-name">expo-1st</span></p>
+            <p><strong>Service:</strong> <span class="badge">test-frontend</span></p>
+            <p><strong>Status:</strong> <span class="badge">✅ Running</span></p>
+        </div>
+
+        <div class="api-link">
+            <p>API Endpoint:</p>
+            <a href="#" id="api-url" target="_blank">Loading...</a>
+            <div id="api-status"></div>
+        </div>
+    </div>
+
+    <script>
+        // Get team name from URL
+        const hostname = window.location.hostname;
+        const parts = hostname.split('.');
+        let teamName = 'expo-1st';
+        
+        if (parts.length >= 3) {
+            // If hostname is like test-frontend.expo-1st.bp.elmhakathon.com
+            teamName = parts[1];
+        }
+        
+        document.getElementById('team-name').textContent = teamName;
+        
+        // Set API URL
+        const apiUrl = `https://test-api.${teamName}.bp.elmhakathon.com`;
+        const apiLink = document.getElementById('api-url');
+        apiLink.href = apiUrl;
+        apiLink.textContent = apiUrl;
+        
+        // Test API connection
+        async function testAPI() {
+            try {
+                const response = await fetch(`${apiUrl}/api/info`);
+                const data = await response.json();
+                document.getElementById('api-status').innerHTML = `
+                    <strong>API Response:</strong><br>
+                    ${JSON.stringify(data, null, 2)}
+                `;
+            } catch (error) {
+                document.getElementById('api-status').innerHTML = `
+                    <strong>API Status:</strong><br>
+                    ⚠️ Could not connect to API<br>
+                    ${error.message}
+                `;
+            }
+        }
+        
+        // Test API on load
+        testAPI();
+    </script>
+</body>
+</html>

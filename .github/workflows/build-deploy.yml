@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       github_repo_name:
-        description: 'Repository/Service name (e.g., api, frontend, backend, mobile)'
+        description: 'Repository/Service name (e.g., test-api, test-frontend, api, frontend)'
         required: true
         type: string
   push:
@@ -20,7 +20,7 @@ env:
   AWS_REGION: ap-southeast-1
   # These will be set dynamically based on inputs
   TEAM_NAME: ${{ github.event.inputs.team_name || 'expo-1st' }}
-  REPO_NAME: ${{ github.event.inputs.github_repo_name || 'api' }}
+  REPO_NAME: ${{ github.event.inputs.github_repo_name || 'test-api' }}
 
 jobs:
   build-and-deploy:
@@ -107,24 +107,31 @@ jobs:
             
             echo "::notice::Buildable services: $BUILDABLE_SERVICES"
             
-            # Determine which service to build
-            if echo "$BUILDABLE_SERVICES" | grep -q "^app$"; then
-              BUILD_SERVICE="app"
+            # Determine which service to build based on REPO_NAME
+            # Map: test-api -> api, test-frontend -> frontend, api -> api, frontend -> frontend
+            SERVICE_TO_BUILD=""
+            if [[ "${{ env.REPO_NAME }}" == *"api"* ]]; then
+              SERVICE_TO_BUILD="api"
+            elif [[ "${{ env.REPO_NAME }}" == *"frontend"* ]]; then
+              SERVICE_TO_BUILD="frontend"
+            elif echo "$BUILDABLE_SERVICES" | grep -q "^${{ env.REPO_NAME }}$"; then
+              SERVICE_TO_BUILD="${{ env.REPO_NAME }}"
             else
-              BUILD_SERVICE=$(echo "$BUILDABLE_SERVICES" | head -n1)
+              # Default to first buildable service
+              SERVICE_TO_BUILD=$(echo "$BUILDABLE_SERVICES" | head -n1)
             fi
             
-            if [ -z "$BUILD_SERVICE" ]; then
+            if [ -z "$SERVICE_TO_BUILD" ]; then
               echo "::error::No buildable service found in docker-compose file"
               exit 1
             fi
             
-            echo "::notice::Building service: $BUILD_SERVICE"
-            docker compose -f ${{ steps.build-method.outputs.file }} build $BUILD_SERVICE
+            echo "::notice::Building service: $SERVICE_TO_BUILD"
+            docker compose -f ${{ steps.build-method.outputs.file }} build $SERVICE_TO_BUILD
             
             # Get the built image name (tag it with the compose project name + service name)
             COMPOSE_PROJECT="${PWD##*/}"
-            COMPOSE_IMAGE="${COMPOSE_PROJECT}-${BUILD_SERVICE}"
+            COMPOSE_IMAGE="${COMPOSE_PROJECT}-${SERVICE_TO_BUILD}"
             
             echo "::notice::Tagging image: $COMPOSE_IMAGE"
             docker tag $COMPOSE_IMAGE $IMAGE_TAG
