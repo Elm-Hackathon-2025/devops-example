@@ -1,0 +1,261 @@
+name: Build and Deploy to ECS
+
+on:
+  workflow_dispatch:
+    inputs:
+      team_name:
+        description: 'Team name (e.g., expo-1st, heros, rollingstars)'
+        required: true
+        type: string
+      github_repo_name:
+        description: 'Repository/Service name (e.g., api, frontend, backend, mobile)'
+        required: true
+        type: string
+  push:
+    branches:
+      - main
+      - develop
+
+env:
+  AWS_REGION: ap-southeast-1
+  # These will be set dynamically based on inputs
+  TEAM_NAME: ${{ github.event.inputs.team_name || 'expo-1st' }}
+  REPO_NAME: ${{ github.event.inputs.github_repo_name || 'api' }}
+
+jobs:
+  build-and-deploy:
+    name: Build & Deploy ${{ github.event.inputs.github_repo_name }} for ${{ github.event.inputs.team_name }}
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        run: |
+          aws ecr get-login-password --region ${{ env.AWS_REGION }} | \
+            docker login --username AWS --password-stdin ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+          echo "registry=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com" >> $GITHUB_OUTPUT
+
+      - name: Set ECR repository name
+        id: ecr-repo
+        run: |
+          # ECR repository format: hackathon-{team_name}
+          ECR_REPO="hackathon-${{ env.TEAM_NAME }}"
+          echo "repository=$ECR_REPO" >> $GITHUB_OUTPUT
+          echo "::notice::ECR Repository: $ECR_REPO"
+
+      - name: Detect build method
+        id: build-method
+        run: |
+          if [ -f "docker-compose.yml" ] || [ -f "docker-compose.yaml" ]; then
+            echo "method=compose" >> $GITHUB_OUTPUT
+            echo "::notice::Found docker-compose file, will use docker-compose build"
+            if [ -f "docker-compose.yml" ]; then
+              echo "file=docker-compose.yml" >> $GITHUB_OUTPUT
+            else
+              echo "file=docker-compose.yaml" >> $GITHUB_OUTPUT
+            fi
+          elif [ -f "Dockerfile.node" ]; then
+            echo "method=dockerfile" >> $GITHUB_OUTPUT
+            echo "file=Dockerfile.node" >> $GITHUB_OUTPUT
+            echo "::notice::Found Dockerfile.node, will use docker build"
+          elif [ -f "Dockerfile" ]; then
+            echo "method=dockerfile" >> $GITHUB_OUTPUT
+            echo "file=Dockerfile" >> $GITHUB_OUTPUT
+            echo "::notice::Found Dockerfile, will use docker build"
+          else
+            echo "::error::No Dockerfile or docker-compose file found"
+            exit 1
+          fi
+
+      - name: Build Docker image
+        run: |
+          IMAGE_TAG="${{ steps.login-ecr.outputs.registry }}/${{ steps.ecr-repo.outputs.repository }}:latest"
+          IMAGE_TAG_REPO="${{ steps.login-ecr.outputs.registry }}/${{ steps.ecr-repo.outputs.repository }}:${{ env.REPO_NAME }}-latest"
+          IMAGE_TAG_SHA="${{ steps.login-ecr.outputs.registry }}/${{ steps.ecr-repo.outputs.repository }}:${{ env.REPO_NAME }}-${{ github.sha }}"
+          
+          echo "::notice::Building Docker image..."
+          echo "::notice::Build method: ${{ steps.build-method.outputs.method }}"
+          echo "::notice::Build file: ${{ steps.build-method.outputs.file }}"
+          echo "::notice::Image tags: $IMAGE_TAG, $IMAGE_TAG_REPO, $IMAGE_TAG_SHA"
+          
+          if [ "${{ steps.build-method.outputs.method }}" == "compose" ]; then
+            # Build using docker-compose
+            echo "::notice::Building with docker-compose..."
+            
+            # Export environment variables for docker-compose
+            export TEAM_NAME=${{ env.TEAM_NAME }}
+            export REPO_NAME=${{ env.REPO_NAME }}
+            export IMAGE_TAG=$IMAGE_TAG
+            
+            # Build the app service (or first service)
+            docker-compose -f ${{ steps.build-method.outputs.file }} build app || \
+            docker-compose -f ${{ steps.build-method.outputs.file }} build $(docker-compose -f ${{ steps.build-method.outputs.file }} config --services | head -n1)
+            
+            # Get the built image name
+            COMPOSE_IMAGE=$(docker-compose -f ${{ steps.build-method.outputs.file }} config | grep 'image:' | head -n1 | awk '{print $2}')
+            
+            if [ -z "$COMPOSE_IMAGE" ]; then
+              # If no image name in compose, use the service name
+              SERVICE_NAME=$(docker-compose -f ${{ steps.build-method.outputs.file }} config --services | head -n1)
+              COMPOSE_IMAGE="${PWD##*/}_${SERVICE_NAME}"
+            fi
+            
+            echo "::notice::Tagging image from docker-compose: $COMPOSE_IMAGE"
+            docker tag $COMPOSE_IMAGE $IMAGE_TAG
+            docker tag $COMPOSE_IMAGE $IMAGE_TAG_REPO
+            docker tag $COMPOSE_IMAGE $IMAGE_TAG_SHA
+          else
+            # Build using Dockerfile
+            echo "::notice::Building with Dockerfile..."
+            docker build \
+              --platform linux/amd64 \
+              -f ${{ steps.build-method.outputs.file }} \
+              -t $IMAGE_TAG \
+              -t $IMAGE_TAG_REPO \
+              -t $IMAGE_TAG_SHA \
+              --build-arg TEAM_NAME=${{ env.TEAM_NAME }} \
+              --build-arg REPO_NAME=${{ env.REPO_NAME }} \
+              .
+          fi
+          
+          echo "image_tag=$IMAGE_TAG" >> $GITHUB_ENV
+          echo "image_tag_repo=$IMAGE_TAG_REPO" >> $GITHUB_ENV
+          echo "image_tag_sha=$IMAGE_TAG_SHA" >> $GITHUB_ENV
+
+      - name: Push Docker image to ECR
+        run: |
+          echo "::notice::Pushing images to ECR..."
+          docker push ${{ env.image_tag }}
+          docker push ${{ env.image_tag_repo }}
+          docker push ${{ env.image_tag_sha }}
+          echo "::notice::Successfully pushed all image tags"
+
+      - name: Get ECS service name
+        id: ecs-service
+        run: |
+          # ECS service format: hackathon-{team_name}
+          ECS_SERVICE="hackathon-${{ env.TEAM_NAME }}"
+          ECS_CLUSTER="hackathon-cluster"
+          echo "service=$ECS_SERVICE" >> $GITHUB_OUTPUT
+          echo "cluster=$ECS_CLUSTER" >> $GITHUB_OUTPUT
+          echo "::notice::ECS Service: $ECS_SERVICE"
+          echo "::notice::ECS Cluster: $ECS_CLUSTER"
+
+      - name: Check if ECS service exists
+        id: check-ecs
+        run: |
+          if aws ecs describe-services \
+            --cluster ${{ steps.ecs-service.outputs.cluster }} \
+            --services ${{ steps.ecs-service.outputs.service }} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'services[0].serviceName' \
+            --output text 2>/dev/null | grep -q "${{ steps.ecs-service.outputs.service }}"; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "::notice::ECS service exists"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "::warning::ECS service does not exist"
+          fi
+
+      - name: Force new deployment
+        if: steps.check-ecs.outputs.exists == 'true'
+        run: |
+          echo "::notice::Forcing new deployment for ${{ steps.ecs-service.outputs.service }}..."
+          aws ecs update-service \
+            --cluster ${{ steps.ecs-service.outputs.cluster }} \
+            --service ${{ steps.ecs-service.outputs.service }} \
+            --force-new-deployment \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Wait for service stability
+        if: steps.check-ecs.outputs.exists == 'true'
+        run: |
+          echo "::notice::Waiting for service to stabilize (this may take several minutes)..."
+          aws ecs wait services-stable \
+            --cluster ${{ steps.ecs-service.outputs.cluster }} \
+            --services ${{ steps.ecs-service.outputs.service }} \
+            --region ${{ env.AWS_REGION }}
+          echo "::notice::Service is stable"
+
+      - name: Get service status
+        if: steps.check-ecs.outputs.exists == 'true'
+        run: |
+          echo "::group::Service Status"
+          aws ecs describe-services \
+            --cluster ${{ steps.ecs-service.outputs.cluster }} \
+            --services ${{ steps.ecs-service.outputs.service }} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'services[0].{Status:status,DesiredCount:desiredCount,RunningCount:runningCount,PendingCount:pendingCount}' \
+            --output table
+          echo "::endgroup::"
+
+      - name: Get task details
+        if: steps.check-ecs.outputs.exists == 'true'
+        run: |
+          echo "::group::Recent Tasks"
+          TASK_ARNS=$(aws ecs list-tasks \
+            --cluster ${{ steps.ecs-service.outputs.cluster }} \
+            --service-name ${{ steps.ecs-service.outputs.service }} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'taskArns[0:3]' \
+            --output text)
+          
+          if [ ! -z "$TASK_ARNS" ]; then
+            aws ecs describe-tasks \
+              --cluster ${{ steps.ecs-service.outputs.cluster }} \
+              --tasks $TASK_ARNS \
+              --region ${{ env.AWS_REGION }} \
+              --query 'tasks[*].{TaskArn:taskArn,Status:lastStatus,Health:healthStatus,Started:startedAt}' \
+              --output table
+          else
+            echo "No tasks found"
+          fi
+          echo "::endgroup::"
+
+      - name: Deployment summary
+        if: always()
+        run: |
+          echo "::group::Deployment Summary"
+          echo "================================================"
+          echo "Deployment Status: ${{ job.status }}"
+          echo "================================================"
+          echo "Team Name: ${{ env.TEAM_NAME }}"
+          echo "Repository/Service: ${{ env.REPO_NAME }}"
+          echo "ECR Repository: ${{ steps.ecr-repo.outputs.repository }}"
+          echo "ECS Cluster: ${{ steps.ecs-service.outputs.cluster }}"
+          echo "ECS Service: ${{ steps.ecs-service.outputs.service }}"
+          echo "================================================"
+          echo "Primary URL: https://${{ env.TEAM_NAME }}.bp.elmhakathon.com"
+          echo "Service URL: https://${{ env.REPO_NAME }}.${{ env.TEAM_NAME }}.bp.elmhakathon.com"
+          echo "================================================"
+          echo "Image Tags:"
+          echo "  - latest"
+          echo "  - ${{ env.REPO_NAME }}-latest"
+          echo "  - ${{ env.REPO_NAME }}-${{ github.sha }}"
+          echo "================================================"
+          echo "::endgroup::"
+          
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "::notice::✅ Deployment successful for ${{ env.TEAM_NAME }}/${{ env.REPO_NAME }}"
+            echo "::notice::🔗 Access at: https://${{ env.REPO_NAME }}.${{ env.TEAM_NAME }}.bp.elmhakathon.com"
+          else
+            echo "::error::❌ Deployment failed for ${{ env.TEAM_NAME }}/${{ env.REPO_NAME }}"
+          fi
+
+      - name: Service not found warning
+        if: steps.check-ecs.outputs.exists == 'false'
+        run: |
+          echo "::warning::ECS service '${{ steps.ecs-service.outputs.service }}' not found in cluster '${{ steps.ecs-service.outputs.cluster }}'"
+          echo "::warning::The Docker image has been built and pushed to ECR, but no ECS service exists yet."
+          echo "::warning::Please ensure the CDK stack has been deployed first to create the ECS service."
+          echo "::notice::Image available at: ${{ env.image_tag }}"
