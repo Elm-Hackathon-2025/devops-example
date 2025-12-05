@@ -199,6 +199,26 @@ jobs:
             echo "SERVICE_${i}_ECR_REPO=$ECR_REPO" >> $GITHUB_ENV
             echo "SERVICE_${i}_IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
             
+            # Extract container port from docker-compose
+            if [ "$BUILD_METHOD" == "compose" ]; then
+              CONTAINER_PORT=$(docker compose -f ${{ steps.detect-services.outputs.file }} config 2>/dev/null | \
+                grep -A 20 "  $COMPOSE_SERVICE_NAME:" | \
+                grep -E "^\s+- \"[0-9]+:[0-9]+\"" | \
+                head -1 | \
+                grep -oE '[0-9]+:[0-9]+' | \
+                cut -d':' -f2)
+              
+              # If no port found, default to 3000
+              if [ -z "$CONTAINER_PORT" ]; then
+                CONTAINER_PORT=3000
+              fi
+            else
+              CONTAINER_PORT=3000
+            fi
+            
+            echo "SERVICE_${i}_PORT=$CONTAINER_PORT" >> $GITHUB_ENV
+            echo "::notice::Container port: $CONTAINER_PORT"
+            
             echo "::endgroup::"
           done
           
@@ -248,6 +268,7 @@ jobs:
             SERVICE_NAME=$(printenv SERVICE_${i}_NAME)
             ECR_REPO=$(printenv SERVICE_${i}_ECR_REPO)
             IMAGE_TAG=$(printenv SERVICE_${i}_IMAGE_TAG)
+            CONTAINER_PORT=$(printenv SERVICE_${i}_PORT)
             
             ECS_SERVICE="hackathon-${{ env.TEAM_NAME }}-$SERVICE_NAME"
             TASK_FAMILY="hackathon-${{ env.TEAM_NAME }}-$SERVICE_NAME"
@@ -256,15 +277,6 @@ jobs:
             echo "::notice::ECS Service: $ECS_SERVICE"
             echo "::notice::Task Family: $TASK_FAMILY"
             echo "::notice::Image: $IMAGE_TAG"
-            
-            # Determine container port based on service name
-            # Frontend uses 8080, API uses 3000
-            if [[ "$SERVICE_NAME" == *"frontend"* ]]; then
-              CONTAINER_PORT=8080
-            else
-              CONTAINER_PORT=3000
-            fi
-            
             echo "::notice::Container Port: $CONTAINER_PORT"
             
             # Create task definition
@@ -329,10 +341,11 @@ jobs:
               --query 'services[0].serviceName' \
               --output text 2>/dev/null | grep -q "$ECS_SERVICE"; then
               
-              echo "::notice::Service exists, forcing new deployment..."
+              echo "::notice::Service exists, updating with new task definition..."
               aws ecs update-service \
                 --cluster $CLUSTER_NAME \
                 --service $ECS_SERVICE \
+                --task-definition $TASK_DEF_ARN \
                 --force-new-deployment \
                 --region ${{ env.AWS_REGION }}
             else
