@@ -7,10 +7,6 @@ on:
         description: 'Team name (e.g., expo-1st, heros, rollingstars)'
         required: true
         type: string
-      github_repo_name:
-        description: 'Repository/Service name (e.g., test-api, test-frontend, api, frontend)'
-        required: true
-        type: string
   push:
     branches:
       - main
@@ -18,13 +14,12 @@ on:
 
 env:
   AWS_REGION: ap-southeast-1
-  # These will be set dynamically based on inputs
+  # Team name is set from input or defaults to expo-1st
   TEAM_NAME: ${{ github.event.inputs.team_name || 'expo-1st' }}
-  REPO_NAME: ${{ github.event.inputs.github_repo_name || 'test-api' }}
 
 jobs:
   build-and-deploy:
-    name: Build & Deploy ${{ github.event.inputs.github_repo_name }} for ${{ github.event.inputs.team_name }}
+    name: Build & Deploy All Services for ${{ github.event.inputs.team_name }}
     runs-on: ubuntu-latest
     
     steps:
@@ -45,194 +40,154 @@ jobs:
             docker login --username AWS --password-stdin ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
           echo "registry=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com" >> $GITHUB_OUTPUT
 
-      - name: Set ECR repository name
-        id: ecr-repo
+      - name: Detect build method and services
+        id: detect-services
         run: |
-          # ECR repository format: hackathon-{team_name}-{repo_name}
-          # This ensures each service has its own ECR repository
-          ECR_REPO="hackathon-${{ env.TEAM_NAME }}-${{ env.REPO_NAME }}"
-          echo "repository=$ECR_REPO" >> $GITHUB_OUTPUT
-          echo "::notice::ECR Repository: $ECR_REPO"
-
-      - name: Ensure ECR Repository Exists
-        run: |
-          ECR_REPO="${{ steps.ecr-repo.outputs.repository }}"
-          
-          if ! aws ecr describe-repositories --repository-names $ECR_REPO --region ${{ env.AWS_REGION }} >/dev/null 2>&1; then
-            echo "::notice::Creating ECR repository: $ECR_REPO"
-            aws ecr create-repository \
-              --repository-name $ECR_REPO \
-              --image-scanning-configuration scanOnPush=true \
-              --region ${{ env.AWS_REGION }}
-          else
-            echo "::notice::ECR repository already exists: $ECR_REPO"
-          fi
-
-      - name: Ensure CloudWatch Log Group Exists
-        run: |
-          LOG_GROUP="/ecs/hackathon/${{ env.TEAM_NAME }}/${{ env.REPO_NAME }}"
-          
-          if ! aws logs describe-log-groups --log-group-name-prefix "$LOG_GROUP" --region ${{ env.AWS_REGION }} | grep -q "$LOG_GROUP"; then
-            echo "::notice::Creating log group: $LOG_GROUP"
-            aws logs create-log-group --log-group-name "$LOG_GROUP" --region ${{ env.AWS_REGION }}
-            aws logs put-retention-policy --log-group-name "$LOG_GROUP" --retention-in-days 7 --region ${{ env.AWS_REGION }}
-          else
-            echo "::notice::Log group already exists: $LOG_GROUP"
-          fi
-
-      - name: Detect build method
-        id: build-method
-        run: |
-          if [ -f "Dockerfile.node" ]; then
-            echo "method=dockerfile" >> $GITHUB_OUTPUT
-            echo "file=Dockerfile.node" >> $GITHUB_OUTPUT
-            echo "::notice::Found Dockerfile.node, will use docker build"
-          elif [ -f "Dockerfile" ]; then
-            echo "method=dockerfile" >> $GITHUB_OUTPUT
-            echo "file=Dockerfile" >> $GITHUB_OUTPUT
-            echo "::notice::Found Dockerfile, will use docker build"
-          elif [ -f "docker-compose.yml" ] || [ -f "docker-compose.yaml" ]; then
+          if [ -f "docker-compose.yml" ] || [ -f "docker-compose.yaml" ]; then
             echo "method=compose" >> $GITHUB_OUTPUT
-            echo "::notice::Found docker-compose file, will use docker compose build"
             if [ -f "docker-compose.yml" ]; then
-              echo "file=docker-compose.yml" >> $GITHUB_OUTPUT
+              COMPOSE_FILE="docker-compose.yml"
             else
-              echo "file=docker-compose.yaml" >> $GITHUB_OUTPUT
+              COMPOSE_FILE="docker-compose.yaml"
             fi
+            echo "file=$COMPOSE_FILE" >> $GITHUB_OUTPUT
+            echo "::notice::Found $COMPOSE_FILE, detecting buildable services..."
+            
+            # Get list of services that have a build section
+            BUILDABLE_SERVICES=$(docker compose -f $COMPOSE_FILE config --services | while read service; do
+              if docker compose -f $COMPOSE_FILE config | grep -A 10 "^  $service:" | grep -q "build:"; then
+                echo "$service"
+              fi
+            done)
+            
+            if [ -z "$BUILDABLE_SERVICES" ]; then
+              echo "::error::No buildable services found in $COMPOSE_FILE"
+              exit 1
+            fi
+            
+            # Convert to JSON array for matrix strategy
+            SERVICES_JSON=$(echo "$BUILDABLE_SERVICES" | jq -R -s -c 'split("\n") | map(select(length > 0))')
+            echo "services=$SERVICES_JSON" >> $GITHUB_OUTPUT
+            echo "::notice::Buildable services: $BUILDABLE_SERVICES"
+            
+          elif [ -f "Dockerfile" ] || [ -f "Dockerfile.node" ]; then
+            echo "method=dockerfile" >> $GITHUB_OUTPUT
+            if [ -f "Dockerfile.node" ]; then
+              echo "file=Dockerfile.node" >> $GITHUB_OUTPUT
+            else
+              echo "file=Dockerfile" >> $GITHUB_OUTPUT
+            fi
+            # For Dockerfile, create a single-service array with the repo name as service name
+            echo "services=[\"app\"]" >> $GITHUB_OUTPUT
+            echo "::notice::Found Dockerfile, will build single service"
           else
             echo "::error::No Dockerfile or docker-compose file found"
             exit 1
           fi
 
-      - name: Build Docker image
+      - name: Build and Push All Services
         run: |
-          IMAGE_TAG="${{ steps.login-ecr.outputs.registry }}/${{ steps.ecr-repo.outputs.repository }}:latest"
-          IMAGE_TAG_REPO="${{ steps.login-ecr.outputs.registry }}/${{ steps.ecr-repo.outputs.repository }}:${{ env.REPO_NAME }}-latest"
-          IMAGE_TAG_SHA="${{ steps.login-ecr.outputs.registry }}/${{ steps.ecr-repo.outputs.repository }}:${{ env.REPO_NAME }}-${{ github.sha }}"
+          BUILD_METHOD="${{ steps.detect-services.outputs.method }}"
+          SERVICES='${{ steps.detect-services.outputs.services }}'
           
-          echo "::notice::Building Docker image..."
-          echo "::notice::Build method: ${{ steps.build-method.outputs.method }}"
-          echo "::notice::Build file: ${{ steps.build-method.outputs.file }}"
-          echo "::notice::Image tags: $IMAGE_TAG, $IMAGE_TAG_REPO, $IMAGE_TAG_SHA"
+          echo "::group::Building and Pushing Services"
+          echo "Build method: $BUILD_METHOD"
+          echo "Services to build: $SERVICES"
           
-          if [ "${{ steps.build-method.outputs.method }}" == "compose" ]; then
-            # Build using docker compose (v2 syntax)
-            echo "::notice::Building with docker compose..."
+          # Parse services JSON array
+          SERVICE_COUNT=$(echo $SERVICES | jq -r 'length')
+          echo "::notice::Found $SERVICE_COUNT service(s) to build and deploy"
+          
+          for i in $(seq 0 $((SERVICE_COUNT - 1))); do
+            SERVICE_NAME=$(echo $SERVICES | jq -r ".[$i]")
+            echo "::group::Building service: $SERVICE_NAME"
             
-            # Export environment variables for docker compose
-            export TEAM_NAME=${{ env.TEAM_NAME }}
-            export REPO_NAME=${{ env.REPO_NAME }}
-            export IMAGE_TAG=$IMAGE_TAG
+            # ECR repository format: hackathon-{team_name}-{service_name}
+            ECR_REPO="hackathon-${{ env.TEAM_NAME }}-$SERVICE_NAME"
+            IMAGE_TAG="${{ steps.login-ecr.outputs.registry }}/$ECR_REPO:latest"
+            IMAGE_TAG_REPO="${{ steps.login-ecr.outputs.registry }}/$ECR_REPO:$SERVICE_NAME-latest"
+            IMAGE_TAG_SHA="${{ steps.login-ecr.outputs.registry }}/$ECR_REPO:$SERVICE_NAME-${{ github.sha }}"
             
-            # Get list of services that have a build section (exclude image-only services)
-            echo "::notice::Detecting buildable services from compose file..."
-            BUILDABLE_SERVICES=$(docker compose -f ${{ steps.build-method.outputs.file }} config --services | while read service; do
-              if docker compose -f ${{ steps.build-method.outputs.file }} config | grep -A 10 "^  $service:" | grep -q "build:"; then
-                echo "$service"
-              fi
-            done)
+            echo "::notice::ECR Repository: $ECR_REPO"
+            echo "::notice::Image tags: latest, $SERVICE_NAME-latest, $SERVICE_NAME-${{ github.sha }}"
             
-            echo "::notice::Buildable services: $BUILDABLE_SERVICES"
-            
-            # Determine which service to build based on REPO_NAME
-            # Map: test-api -> api, test-frontend -> frontend, api -> api, frontend -> frontend
-            SERVICE_TO_BUILD=""
-            if [[ "${{ env.REPO_NAME }}" == *"api"* ]]; then
-              SERVICE_TO_BUILD="api"
-            elif [[ "${{ env.REPO_NAME }}" == *"frontend"* ]]; then
-              SERVICE_TO_BUILD="frontend"
-            elif echo "$BUILDABLE_SERVICES" | grep -q "^${{ env.REPO_NAME }}$"; then
-              SERVICE_TO_BUILD="${{ env.REPO_NAME }}"
+            # Ensure ECR Repository Exists
+            if ! aws ecr describe-repositories --repository-names $ECR_REPO --region ${{ env.AWS_REGION }} >/dev/null 2>&1; then
+              echo "::notice::Creating ECR repository: $ECR_REPO"
+              aws ecr create-repository \
+                --repository-name $ECR_REPO \
+                --image-scanning-configuration scanOnPush=true \
+                --region ${{ env.AWS_REGION }}
             else
-              # Default to first buildable service
-              SERVICE_TO_BUILD=$(echo "$BUILDABLE_SERVICES" | head -n1)
+              echo "::notice::ECR repository already exists: $ECR_REPO"
             fi
             
-            if [ -z "$SERVICE_TO_BUILD" ]; then
-              echo "::error::No buildable service found in docker-compose file"
-              exit 1
+            # Ensure CloudWatch Log Group Exists
+            LOG_GROUP="/ecs/hackathon/${{ env.TEAM_NAME }}/$SERVICE_NAME"
+            if aws logs describe-log-groups --log-group-name-prefix "$LOG_GROUP" --region ${{ env.AWS_REGION }} --query "logGroups[?logGroupName=='$LOG_GROUP'].logGroupName" --output text | grep -q "$LOG_GROUP"; then
+              echo "::notice::Log group already exists: $LOG_GROUP"
+            else
+              echo "::notice::Creating log group: $LOG_GROUP"
+              if aws logs create-log-group --log-group-name "$LOG_GROUP" --region ${{ env.AWS_REGION }} 2>&1; then
+                aws logs put-retention-policy --log-group-name "$LOG_GROUP" --retention-in-days 7 --region ${{ env.AWS_REGION }} || true
+              else
+                echo "::notice::Log group may already exist (race condition), continuing..."
+              fi
             fi
             
-            echo "::notice::Building service: $SERVICE_TO_BUILD"
-            docker compose -f ${{ steps.build-method.outputs.file }} build $SERVICE_TO_BUILD
+            # Build based on method
+            if [ "$BUILD_METHOD" == "compose" ]; then
+              echo "::notice::Building with docker compose..."
+              docker compose -f ${{ steps.detect-services.outputs.file }} build $SERVICE_NAME
+              
+              # Get the built image name
+              COMPOSE_PROJECT="${PWD##*/}"
+              COMPOSE_IMAGE="${COMPOSE_PROJECT}-${SERVICE_NAME}"
+              
+              echo "::notice::Tagging image: $COMPOSE_IMAGE -> $IMAGE_TAG"
+              docker tag $COMPOSE_IMAGE $IMAGE_TAG
+              docker tag $COMPOSE_IMAGE $IMAGE_TAG_REPO
+              docker tag $COMPOSE_IMAGE $IMAGE_TAG_SHA
+            else
+              echo "::notice::Building with Dockerfile..."
+              docker build \
+                --platform linux/amd64 \
+                -f ${{ steps.detect-services.outputs.file }} \
+                -t $IMAGE_TAG \
+                -t $IMAGE_TAG_REPO \
+                -t $IMAGE_TAG_SHA \
+                --build-arg TEAM_NAME=${{ env.TEAM_NAME }} \
+                --build-arg SERVICE_NAME=$SERVICE_NAME \
+                .
+            fi
             
-            # Get the built image name (tag it with the compose project name + service name)
-            COMPOSE_PROJECT="${PWD##*/}"
-            COMPOSE_IMAGE="${COMPOSE_PROJECT}-${SERVICE_TO_BUILD}"
+            # Push images
+            echo "::notice::Pushing images to ECR..."
+            docker push $IMAGE_TAG
+            docker push $IMAGE_TAG_REPO
+            docker push $IMAGE_TAG_SHA
+            echo "::notice::✅ Successfully pushed all tags for $SERVICE_NAME"
             
-            echo "::notice::Tagging image: $COMPOSE_IMAGE"
-            docker tag $COMPOSE_IMAGE $IMAGE_TAG
-            docker tag $COMPOSE_IMAGE $IMAGE_TAG_REPO
-            docker tag $COMPOSE_IMAGE $IMAGE_TAG_SHA
-          else
-            # Build using Dockerfile
-            echo "::notice::Building with Dockerfile..."
-            docker build \
-              --platform linux/amd64 \
-              -f ${{ steps.build-method.outputs.file }} \
-              -t $IMAGE_TAG \
-              -t $IMAGE_TAG_REPO \
-              -t $IMAGE_TAG_SHA \
-              --build-arg TEAM_NAME=${{ env.TEAM_NAME }} \
-              --build-arg REPO_NAME=${{ env.REPO_NAME }} \
-              .
-          fi
+            # Store service info for deployment step
+            echo "SERVICE_${i}_NAME=$SERVICE_NAME" >> $GITHUB_ENV
+            echo "SERVICE_${i}_ECR_REPO=$ECR_REPO" >> $GITHUB_ENV
+            echo "SERVICE_${i}_IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
+            
+            echo "::endgroup::"
+          done
           
-          echo "image_tag=$IMAGE_TAG" >> $GITHUB_ENV
-          echo "image_tag_repo=$IMAGE_TAG_REPO" >> $GITHUB_ENV
-          echo "image_tag_sha=$IMAGE_TAG_SHA" >> $GITHUB_ENV
+          # Store service count for deployment
+          echo "SERVICE_COUNT=$SERVICE_COUNT" >> $GITHUB_ENV
+          echo "::endgroup::"
 
-      - name: Push Docker image to ECR
+      - name: Deploy All Services to ECS
         run: |
-          echo "::notice::Pushing images to ECR..."
-          docker push ${{ env.image_tag }}
-          docker push ${{ env.image_tag_repo }}
-          docker push ${{ env.image_tag_sha }}
-          echo "::notice::Successfully pushed all image tags"
-
-      - name: Set ECS service details
-        id: ecs-service
-        run: |
-          # ECS service format: hackathon-{team_name}-{repo_name}
-          # This ensures each service has its own ECS service
-          ECS_SERVICE="hackathon-${{ env.TEAM_NAME }}-${{ env.REPO_NAME }}"
-          ECS_CLUSTER="hackathon-cluster"
-          echo "service=$ECS_SERVICE" >> $GITHUB_OUTPUT
-          echo "cluster=$ECS_CLUSTER" >> $GITHUB_OUTPUT
-          echo "::notice::ECS Service: $ECS_SERVICE"
-          echo "::notice::ECS Cluster: $ECS_CLUSTER"
+          echo "::group::Deploying Services to ECS"
+          SERVICE_COUNT=${{ env.SERVICE_COUNT }}
+          CLUSTER_NAME="hackathon-cluster"
           
-          # Also set as env vars for the summary step
-          echo "ECS_SERVICE=$ECS_SERVICE" >> $GITHUB_ENV
-          echo "ECS_CLUSTER=$ECS_CLUSTER" >> $GITHUB_ENV
-
-      - name: Check if ECS service exists
-        id: check-ecs
-        run: |
-          if aws ecs describe-services \
-            --cluster ${{ steps.ecs-service.outputs.cluster }} \
-            --services ${{ steps.ecs-service.outputs.service }} \
-            --region ${{ env.AWS_REGION }} \
-            --query 'services[0].serviceName' \
-            --output text 2>/dev/null | grep -q "${{ steps.ecs-service.outputs.service }}"; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-            echo "::notice::ECS service exists"
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
-            echo "::warning::ECS service does not exist, will create it"
-          fi
-
-      - name: Create ECS Task Definition and Service
-        if: steps.check-ecs.outputs.exists == 'false'
-        run: |
-          TASK_FAMILY="hackathon-${{ env.TEAM_NAME }}-${{ env.REPO_NAME }}"
-          SERVICE_NAME="${{ steps.ecs-service.outputs.service }}"
-          CLUSTER_NAME="${{ steps.ecs-service.outputs.cluster }}"
-          
-          echo "::notice::Creating task definition: $TASK_FAMILY"
-          
-          # Get IAM role ARNs from existing task definition
-          echo "::notice::Getting IAM roles from existing task definition"
+          # Get IAM role ARNs and network config from template service (once)
+          echo "::notice::Getting IAM roles and network config from template service"
           TEMPLATE_TASK_DEF=$(aws ecs describe-services \
             --cluster $CLUSTER_NAME \
             --services hackathon-expo-1st \
@@ -248,11 +203,36 @@ jobs:
           EXECUTION_ROLE_ARN=$(echo $ROLE_ARNS | jq -r '.executionRole')
           TASK_ROLE_ARN=$(echo $ROLE_ARNS | jq -r '.taskRole')
           
-          echo "::notice::Execution Role: $EXECUTION_ROLE_ARN"
-          echo "::notice::Task Role: $TASK_ROLE_ARN"
+          NETWORK_CONFIG=$(aws ecs describe-services \
+            --cluster $CLUSTER_NAME \
+            --services hackathon-expo-1st \
+            --region ${{ env.AWS_REGION }} \
+            --query 'services[0].networkConfiguration.awsvpcConfiguration' \
+            --output json)
           
-          # Create task definition
-          cat > task-definition.json <<EOF
+          SUBNET_IDS=$(echo $NETWORK_CONFIG | jq -r '.subnets | join(",")')
+          SECURITY_GROUP_ID=$(echo $NETWORK_CONFIG | jq -r '.securityGroups[0]')
+          
+          echo "::notice::Using Execution Role: $EXECUTION_ROLE_ARN"
+          echo "::notice::Using Task Role: $TASK_ROLE_ARN"
+          echo "::notice::Using Subnets: $SUBNET_IDS"
+          echo "::notice::Using Security Group: $SECURITY_GROUP_ID"
+          
+          for i in $(seq 0 $((SERVICE_COUNT - 1))); do
+            SERVICE_NAME=$(printenv SERVICE_${i}_NAME)
+            ECR_REPO=$(printenv SERVICE_${i}_ECR_REPO)
+            IMAGE_TAG=$(printenv SERVICE_${i}_IMAGE_TAG)
+            
+            ECS_SERVICE="hackathon-${{ env.TEAM_NAME }}-$SERVICE_NAME"
+            TASK_FAMILY="hackathon-${{ env.TEAM_NAME }}-$SERVICE_NAME"
+            
+            echo "::group::Deploying service: $SERVICE_NAME"
+            echo "::notice::ECS Service: $ECS_SERVICE"
+            echo "::notice::Task Family: $TASK_FAMILY"
+            echo "::notice::Image: $IMAGE_TAG"
+            
+            # Create task definition
+            cat > task-definition-${i}.json <<EOF
           {
             "family": "$TASK_FAMILY",
             "networkMode": "awsvpc",
@@ -263,8 +243,8 @@ jobs:
             "taskRoleArn": "$TASK_ROLE_ARN",
             "containerDefinitions": [
               {
-                "name": "${{ env.REPO_NAME }}",
-                "image": "${{ env.image_tag }}",
+                "name": "$SERVICE_NAME",
+                "image": "$IMAGE_TAG",
                 "portMappings": [
                   {
                     "containerPort": 3000,
@@ -274,13 +254,13 @@ jobs:
                 "environment": [
                   {"name": "NODE_ENV", "value": "production"},
                   {"name": "TEAM_NAME", "value": "${{ env.TEAM_NAME }}"},
-                  {"name": "REPO_NAME", "value": "${{ env.REPO_NAME }}"},
+                  {"name": "SERVICE_NAME", "value": "$SERVICE_NAME"},
                   {"name": "PORT", "value": "3000"}
                 ],
                 "logConfiguration": {
                   "logDriver": "awslogs",
                   "options": {
-                    "awslogs-group": "/ecs/hackathon/${{ env.TEAM_NAME }}/${{ env.REPO_NAME }}",
+                    "awslogs-group": "/ecs/hackathon/${{ env.TEAM_NAME }}/$SERVICE_NAME",
                     "awslogs-region": "${{ env.AWS_REGION }}",
                     "awslogs-stream-prefix": "ecs"
                   }
@@ -296,95 +276,103 @@ jobs:
             ]
           }
           EOF
-          
-          # Register task definition
-          TASK_DEF_ARN=$(aws ecs register-task-definition \
-            --cli-input-json file://task-definition.json \
-            --query 'taskDefinition.taskDefinitionArn' \
-            --output text)
-          
-          echo "::notice::Task definition created: $TASK_DEF_ARN"
-          
-          # Get network configuration from template service
-          echo "::notice::Getting network configuration from hackathon-expo-1st"
-          NETWORK_CONFIG=$(aws ecs describe-services \
-            --cluster $CLUSTER_NAME \
-            --services hackathon-expo-1st \
-            --region ${{ env.AWS_REGION }} \
-            --query 'services[0].networkConfiguration.awsvpcConfiguration' \
-            --output json)
-          
-          SUBNET_IDS=$(echo $NETWORK_CONFIG | jq -r '.subnets | join(",")')
-          SECURITY_GROUP_ID=$(echo $NETWORK_CONFIG | jq -r '.securityGroups[0]')
-          
-          echo "::notice::Creating ECS service: $SERVICE_NAME"
-          echo "::notice::Using subnets: $SUBNET_IDS"
-          echo "::notice::Using security group: $SECURITY_GROUP_ID"
-          
-          # Create ECS service
-          aws ecs create-service \
-            --cluster $CLUSTER_NAME \
-            --service-name $SERVICE_NAME \
-            --task-definition $TASK_FAMILY \
-            --desired-count 1 \
-            --launch-type FARGATE \
-            --platform-version LATEST \
-            --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_IDS],securityGroups=[$SECURITY_GROUP_ID],assignPublicIp=ENABLED}" \
-            --enable-execute-command \
-            --region ${{ env.AWS_REGION }}
-          
-          echo "::notice::Service created successfully!"
-
-      - name: Force new deployment
-        if: steps.check-ecs.outputs.exists == 'true'
-        run: |
-          echo "::notice::Forcing new deployment for ${{ steps.ecs-service.outputs.service }}..."
-          aws ecs update-service \
-            --cluster ${{ steps.ecs-service.outputs.cluster }} \
-            --service ${{ steps.ecs-service.outputs.service }} \
-            --force-new-deployment \
-            --region ${{ env.AWS_REGION }}
-
-      - name: Wait for service stability
-        run: |
-          echo "::notice::Waiting for service to stabilize (this may take several minutes)..."
-          aws ecs wait services-stable \
-            --cluster ${{ steps.ecs-service.outputs.cluster }} \
-            --services ${{ steps.ecs-service.outputs.service }} \
-            --region ${{ env.AWS_REGION }}
-          echo "::notice::Service is stable"
-
-      - name: Get service status
-        run: |
-          echo "::group::Service Status"
-          aws ecs describe-services \
-            --cluster ${{ steps.ecs-service.outputs.cluster }} \
-            --services ${{ steps.ecs-service.outputs.service }} \
-            --region ${{ env.AWS_REGION }} \
-            --query 'services[0].{Status:status,DesiredCount:desiredCount,RunningCount:runningCount,PendingCount:pendingCount}' \
-            --output table
+            
+            # Register task definition
+            TASK_DEF_ARN=$(aws ecs register-task-definition \
+              --cli-input-json file://task-definition-${i}.json \
+              --query 'taskDefinition.taskDefinitionArn' \
+              --output text)
+            
+            echo "::notice::Task definition registered: $TASK_DEF_ARN"
+            
+            # Check if service exists
+            if aws ecs describe-services \
+              --cluster $CLUSTER_NAME \
+              --services $ECS_SERVICE \
+              --region ${{ env.AWS_REGION }} \
+              --query 'services[0].serviceName' \
+              --output text 2>/dev/null | grep -q "$ECS_SERVICE"; then
+              
+              echo "::notice::Service exists, forcing new deployment..."
+              aws ecs update-service \
+                --cluster $CLUSTER_NAME \
+                --service $ECS_SERVICE \
+                --force-new-deployment \
+                --region ${{ env.AWS_REGION }}
+            else
+              echo "::notice::Creating new service..."
+              aws ecs create-service \
+                --cluster $CLUSTER_NAME \
+                --service-name $ECS_SERVICE \
+                --task-definition $TASK_FAMILY \
+                --desired-count 1 \
+                --launch-type FARGATE \
+                --platform-version LATEST \
+                --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_IDS],securityGroups=[$SECURITY_GROUP_ID],assignPublicIp=ENABLED}" \
+                --enable-execute-command \
+                --region ${{ env.AWS_REGION }}
+            fi
+            
+            echo "::endgroup::"
+          done
           echo "::endgroup::"
 
-      - name: Get task details
+      - name: Wait for All Services to Stabilize
         run: |
-          echo "::group::Recent Tasks"
-          TASK_ARNS=$(aws ecs list-tasks \
-            --cluster ${{ steps.ecs-service.outputs.cluster }} \
-            --service-name ${{ steps.ecs-service.outputs.service }} \
-            --region ${{ env.AWS_REGION }} \
-            --query 'taskArns[0:3]' \
-            --output text)
+          echo "::group::Waiting for Services to Stabilize"
+          SERVICE_COUNT=${{ env.SERVICE_COUNT }}
+          CLUSTER_NAME="hackathon-cluster"
           
-          if [ ! -z "$TASK_ARNS" ]; then
-            aws ecs describe-tasks \
-              --cluster ${{ steps.ecs-service.outputs.cluster }} \
-              --tasks $TASK_ARNS \
+          for i in $(seq 0 $((SERVICE_COUNT - 1))); do
+            SERVICE_NAME=$(printenv SERVICE_${i}_NAME)
+            ECS_SERVICE="hackathon-${{ env.TEAM_NAME }}-$SERVICE_NAME"
+            
+            echo "::notice::Waiting for $ECS_SERVICE to stabilize..."
+            aws ecs wait services-stable \
+              --cluster $CLUSTER_NAME \
+              --services $ECS_SERVICE \
+              --region ${{ env.AWS_REGION }}
+            echo "::notice::✅ $ECS_SERVICE is stable"
+          done
+          echo "::endgroup::"
+
+      - name: Get All Services Status
+        run: |
+          echo "::group::All Services Status"
+          SERVICE_COUNT=${{ env.SERVICE_COUNT }}
+          CLUSTER_NAME="hackathon-cluster"
+          
+          for i in $(seq 0 $((SERVICE_COUNT - 1))); do
+            SERVICE_NAME=$(printenv SERVICE_${i}_NAME)
+            ECS_SERVICE="hackathon-${{ env.TEAM_NAME }}-$SERVICE_NAME"
+            
+            echo "::group::Status: $SERVICE_NAME"
+            aws ecs describe-services \
+              --cluster $CLUSTER_NAME \
+              --services $ECS_SERVICE \
               --region ${{ env.AWS_REGION }} \
-              --query 'tasks[*].{TaskArn:taskArn,Status:lastStatus,Health:healthStatus,Started:startedAt}' \
+              --query 'services[0].{Status:status,DesiredCount:desiredCount,RunningCount:runningCount,PendingCount:pendingCount}' \
               --output table
-          else
-            echo "No tasks found"
-          fi
+            
+            TASK_ARNS=$(aws ecs list-tasks \
+              --cluster $CLUSTER_NAME \
+              --service-name $ECS_SERVICE \
+              --region ${{ env.AWS_REGION }} \
+              --query 'taskArns[0:3]' \
+              --output text)
+            
+            if [ ! -z "$TASK_ARNS" ]; then
+              aws ecs describe-tasks \
+                --cluster $CLUSTER_NAME \
+                --tasks $TASK_ARNS \
+                --region ${{ env.AWS_REGION }} \
+                --query 'tasks[*].{TaskArn:taskArn,Status:lastStatus,Health:healthStatus,Started:startedAt}' \
+                --output table
+            else
+              echo "No tasks found"
+            fi
+            echo "::endgroup::"
+          done
           echo "::endgroup::"
 
       - name: Deployment summary
@@ -395,29 +383,27 @@ jobs:
           echo "Deployment Status: ${{ job.status }}"
           echo "================================================"
           echo "Team Name: ${{ env.TEAM_NAME }}"
-          echo "Repository/Service: ${{ env.REPO_NAME }}"
-          echo "ECR Repository: ${{ steps.ecr-repo.outputs.repository }}"
-          echo "ECS Cluster: ${{ env.ECS_CLUSTER }}"
-          echo "ECS Service: ${{ env.ECS_SERVICE }}"
+          echo "Services Deployed: ${{ env.SERVICE_COUNT }}"
+          echo "ECS Cluster: hackathon-cluster"
           echo "================================================"
-          echo "URLs:"
-          echo "  🌐 Team Base URL:    https://${{ env.TEAM_NAME }}.bp.elmhakathon.com"
-          echo "  🎯 Service URL:      https://${{ env.REPO_NAME }}.${{ env.TEAM_NAME }}.bp.elmhakathon.com"
-          echo ""
-          echo "Note: Each service is accessible via its own subdomain"
-          echo "      (e.g., api.expo-1st.bp.elmhakathon.com, frontend.expo-1st.bp.elmhakathon.com)"
+          echo "Deployed Services:"
+          
+          SERVICE_COUNT=${{ env.SERVICE_COUNT }}
+          for i in $(seq 0 $((SERVICE_COUNT - 1))); do
+            SERVICE_NAME=$(printenv SERVICE_${i}_NAME)
+            echo "  - $SERVICE_NAME"
+            echo "    ECS Service: hackathon-${{ env.TEAM_NAME }}-$SERVICE_NAME"
+            echo "    URL: https://$SERVICE_NAME.${{ env.TEAM_NAME }}.bp.elmhakathon.com"
+          done
+          
           echo "================================================"
-          echo "Image Tags:"
-          echo "  - latest"
-          echo "  - ${{ env.REPO_NAME }}-latest"
-          echo "  - ${{ env.REPO_NAME }}-${{ github.sha }}"
+          echo "Team Base URL: https://${{ env.TEAM_NAME }}.bp.elmhakathon.com"
           echo "================================================"
           echo "::endgroup::"
           
           if [ "${{ job.status }}" == "success" ]; then
-            echo "::notice::✅ Deployment successful for ${{ env.TEAM_NAME }}/${{ env.REPO_NAME }}"
+            echo "::notice::✅ Deployment successful for team ${{ env.TEAM_NAME }}"
             echo "::notice::🌐 Team Base: https://${{ env.TEAM_NAME }}.bp.elmhakathon.com"
-            echo "::notice::🎯 Service URL: https://${{ env.REPO_NAME }}.${{ env.TEAM_NAME }}.bp.elmhakathon.com"
           else
-            echo "::error::❌ Deployment failed for ${{ env.TEAM_NAME }}/${{ env.REPO_NAME }}"
+            echo "::error::❌ Deployment failed for team ${{ env.TEAM_NAME }}"
           fi
