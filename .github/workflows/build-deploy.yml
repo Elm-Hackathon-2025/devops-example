@@ -97,17 +97,32 @@ jobs:
             export REPO_NAME=${{ env.REPO_NAME }}
             export IMAGE_TAG=$IMAGE_TAG
             
-            # Build the app service (or first service)
-            docker compose -f ${{ steps.build-method.outputs.file }} build app || \
-            docker compose -f ${{ steps.build-method.outputs.file }} build $(docker compose -f ${{ steps.build-method.outputs.file }} config --services | head -n1)
+            # Get list of services
+            SERVICES=$(docker compose -f ${{ steps.build-method.outputs.file }} config --services)
+            echo "::notice::Available services: $SERVICES"
+            
+            # Try to build 'app' service first, otherwise build the first service
+            if echo "$SERVICES" | grep -q "^app$"; then
+              echo "::notice::Building 'app' service..."
+              docker compose -f ${{ steps.build-method.outputs.file }} build app
+            else
+              FIRST_SERVICE=$(echo "$SERVICES" | head -n1)
+              echo "::notice::Building '$FIRST_SERVICE' service..."
+              docker compose -f ${{ steps.build-method.outputs.file }} build $FIRST_SERVICE
+            fi
             
             # Get the built image name
             COMPOSE_IMAGE=$(docker compose -f ${{ steps.build-method.outputs.file }} config | grep 'image:' | head -n1 | awk '{print $2}')
             
             if [ -z "$COMPOSE_IMAGE" ]; then
               # If no image name in compose, use the service name
-              SERVICE_NAME=$(docker compose -f ${{ steps.build-method.outputs.file }} config --services | head -n1)
+              if echo "$SERVICES" | grep -q "^app$"; then
+                SERVICE_NAME="app"
+              else
+                SERVICE_NAME=$(echo "$SERVICES" | head -n1)
+              fi
               COMPOSE_IMAGE="${PWD##*/}_${SERVICE_NAME}"
+              echo "::notice::No image tag found in compose file, using default: $COMPOSE_IMAGE"
             fi
             
             echo "::notice::Tagging image from docker compose: $COMPOSE_IMAGE"
@@ -140,7 +155,7 @@ jobs:
           docker push ${{ env.image_tag_sha }}
           echo "::notice::Successfully pushed all image tags"
 
-      - name: Get ECS service name
+      - name: Set ECS service details
         id: ecs-service
         run: |
           # ECS service format: hackathon-{team_name}
@@ -150,6 +165,10 @@ jobs:
           echo "cluster=$ECS_CLUSTER" >> $GITHUB_OUTPUT
           echo "::notice::ECS Service: $ECS_SERVICE"
           echo "::notice::ECS Cluster: $ECS_CLUSTER"
+          
+          # Also set as env vars for the summary step
+          echo "ECS_SERVICE=$ECS_SERVICE" >> $GITHUB_ENV
+          echo "ECS_CLUSTER=$ECS_CLUSTER" >> $GITHUB_ENV
 
       - name: Check if ECS service exists
         id: check-ecs
@@ -232,8 +251,8 @@ jobs:
           echo "Team Name: ${{ env.TEAM_NAME }}"
           echo "Repository/Service: ${{ env.REPO_NAME }}"
           echo "ECR Repository: ${{ steps.ecr-repo.outputs.repository }}"
-          echo "ECS Cluster: ${{ steps.ecs-service.outputs.cluster }}"
-          echo "ECS Service: ${{ steps.ecs-service.outputs.service }}"
+          echo "ECS Cluster: ${{ env.ECS_CLUSTER }}"
+          echo "ECS Service: ${{ env.ECS_SERVICE }}"
           echo "================================================"
           echo "URLs:"
           echo "  🌐 Team Base URL:    https://${{ env.TEAM_NAME }}.bp.elmhakathon.com"
