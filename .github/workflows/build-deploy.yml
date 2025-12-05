@@ -304,14 +304,14 @@ jobs:
               TG_NAME="tg-${{ env.TEAM_NAME }}-$SERVICE_NAME"
               TG_NAME="${TG_NAME:0:32}"
               
-              # Check if target group exists
-              EXISTING_TG_ARN=$(aws elbv2 describe-target-groups \
+              # Check if target group exists and verify its port
+              EXISTING_TG_INFO=$(aws elbv2 describe-target-groups \
                 --region ${{ env.AWS_REGION }} \
-                --query "TargetGroups[?TargetGroupName=='$TG_NAME'].TargetGroupArn" \
+                --query "TargetGroups[?TargetGroupName=='$TG_NAME'].[TargetGroupArn,Port]" \
                 --output text 2>/dev/null || echo "")
               
-              if [ -z "$EXISTING_TG_ARN" ]; then
-                echo "::notice::Creating target group: $TG_NAME"
+              if [ -z "$EXISTING_TG_INFO" ]; then
+                echo "::notice::Creating target group: $TG_NAME on port $CONTAINER_PORT"
                 TG_ARN=$(aws elbv2 create-target-group \
                   --name $TG_NAME \
                   --protocol HTTP \
@@ -328,7 +328,42 @@ jobs:
                   --query 'TargetGroups[0].TargetGroupArn' \
                   --output text)
               else
-                TG_ARN=$EXISTING_TG_ARN
+                EXISTING_TG_ARN=$(echo "$EXISTING_TG_INFO" | awk '{print $1}')
+                EXISTING_PORT=$(echo "$EXISTING_TG_INFO" | awk '{print $2}')
+                
+                if [ "$EXISTING_PORT" != "$CONTAINER_PORT" ]; then
+                  echo "::warning::Target group exists with wrong port $EXISTING_PORT (need $CONTAINER_PORT)"
+                  echo "::notice::Deleting and recreating target group with correct port"
+                  
+                  # Delete old target group (this will also remove it from listener rules)
+                  aws elbv2 delete-target-group \
+                    --target-group-arn $EXISTING_TG_ARN \
+                    --region ${{ env.AWS_REGION }} || true
+                  
+                  sleep 5
+                  
+                  # Create new target group with correct port
+                  TG_ARN=$(aws elbv2 create-target-group \
+                    --name $TG_NAME \
+                    --protocol HTTP \
+                    --port $CONTAINER_PORT \
+                    --vpc-id $VPC_ID \
+                    --target-type ip \
+                    --health-check-enabled \
+                    --health-check-path /health \
+                    --health-check-interval-seconds 30 \
+                    --health-check-timeout-seconds 5 \
+                    --healthy-threshold-count 2 \
+                    --unhealthy-threshold-count 3 \
+                    --region ${{ env.AWS_REGION }} \
+                    --query 'TargetGroups[0].TargetGroupArn' \
+                    --output text)
+                  
+                  echo "::notice::Target group recreated with correct port: $CONTAINER_PORT"
+                else
+                  TG_ARN=$EXISTING_TG_ARN
+                  echo "::notice::Target group already exists with correct port: $CONTAINER_PORT"
+                fi
               fi
               
               echo "::notice::Target group: $TG_ARN"
