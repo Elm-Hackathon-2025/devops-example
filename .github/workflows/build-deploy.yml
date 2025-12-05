@@ -226,6 +226,141 @@ jobs:
           echo "SERVICE_COUNT=$SERVICE_COUNT" >> $GITHUB_ENV
           echo "::endgroup::"
 
+      - name: Prepare ALB Target Groups and Listener Rules
+        run: |
+          echo "::group::Preparing ALB Routing"
+          SERVICE_COUNT=${{ env.SERVICE_COUNT }}
+          CLUSTER_NAME="hackathon-cluster"
+          
+          # Get ALB details from the template service
+          echo "::notice::Getting ALB configuration from template service"
+          TEMPLATE_SERVICE=$(aws ecs describe-services \
+            --cluster $CLUSTER_NAME \
+            --services hackathon-expo-1st \
+            --region ${{ env.AWS_REGION }} \
+            --output json)
+          
+          # Extract load balancer info if service is attached to one
+          ALB_TARGET_GROUP_ARN=$(echo $TEMPLATE_SERVICE | jq -r '.services[0].loadBalancers[0].targetGroupArn // empty')
+          
+          if [ -z "$ALB_TARGET_GROUP_ARN" ]; then
+            echo "::warning::Template service not attached to ALB, skipping ALB configuration"
+            echo "HAS_ALB=false" >> $GITHUB_ENV
+          else
+            echo "HAS_ALB=true" >> $GITHUB_ENV
+            
+            # Get VPC ID from target group
+            VPC_ID=$(aws elbv2 describe-target-groups \
+              --target-group-arns $ALB_TARGET_GROUP_ARN \
+              --region ${{ env.AWS_REGION }} \
+              --query 'TargetGroups[0].VpcId' \
+              --output text)
+            
+            # Get ALB ARN from target group
+            ALB_ARN=$(aws elbv2 describe-target-groups \
+              --target-group-arns $ALB_TARGET_GROUP_ARN \
+              --region ${{ env.AWS_REGION }} \
+              --query 'TargetGroups[0].LoadBalancerArns[0]' \
+              --output text)
+            
+            # Get HTTPS listener ARN (port 443)
+            LISTENER_ARN=$(aws elbv2 describe-listeners \
+              --load-balancer-arn $ALB_ARN \
+              --region ${{ env.AWS_REGION }} \
+              --query 'Listeners[?Port==`443`].ListenerArn' \
+              --output text)
+            
+            echo "VPC_ID=$VPC_ID" >> $GITHUB_ENV
+            echo "ALB_ARN=$ALB_ARN" >> $GITHUB_ENV
+            echo "LISTENER_ARN=$LISTENER_ARN" >> $GITHUB_ENV
+            
+            echo "::notice::VPC ID: $VPC_ID"
+            echo "::notice::ALB ARN: $ALB_ARN"
+            echo "::notice::Listener ARN: $LISTENER_ARN"
+            
+            # Get existing rules to determine next priority
+            EXISTING_PRIORITIES=$(aws elbv2 describe-rules \
+              --listener-arn $LISTENER_ARN \
+              --region ${{ env.AWS_REGION }} \
+              --query 'Rules[?Priority!=`default`].Priority' \
+              --output text | tr '\t' '\n' | sort -n | tail -1)
+            
+            if [ -z "$EXISTING_PRIORITIES" ]; then
+              NEXT_PRIORITY=1
+            else
+              NEXT_PRIORITY=$((EXISTING_PRIORITIES + 1))
+            fi
+            
+            echo "::notice::Starting priority: $NEXT_PRIORITY"
+            
+            # Create target groups and listener rules for each service
+            for i in $(seq 0 $((SERVICE_COUNT - 1))); do
+              SERVICE_NAME=$(printenv SERVICE_${i}_NAME)
+              CONTAINER_PORT=$(printenv SERVICE_${i}_PORT)
+              
+              echo "::group::Preparing ALB for $SERVICE_NAME"
+              
+              # Target group name (max 32 chars)
+              TG_NAME="tg-${{ env.TEAM_NAME }}-$SERVICE_NAME"
+              TG_NAME="${TG_NAME:0:32}"
+              
+              # Check if target group exists
+              EXISTING_TG_ARN=$(aws elbv2 describe-target-groups \
+                --region ${{ env.AWS_REGION }} \
+                --query "TargetGroups[?TargetGroupName=='$TG_NAME'].TargetGroupArn" \
+                --output text 2>/dev/null || echo "")
+              
+              if [ -z "$EXISTING_TG_ARN" ]; then
+                echo "::notice::Creating target group: $TG_NAME"
+                TG_ARN=$(aws elbv2 create-target-group \
+                  --name $TG_NAME \
+                  --protocol HTTP \
+                  --port $CONTAINER_PORT \
+                  --vpc-id $VPC_ID \
+                  --target-type ip \
+                  --health-check-enabled \
+                  --health-check-path /health \
+                  --health-check-interval-seconds 30 \
+                  --health-check-timeout-seconds 5 \
+                  --healthy-threshold-count 2 \
+                  --unhealthy-threshold-count 3 \
+                  --region ${{ env.AWS_REGION }} \
+                  --query 'TargetGroups[0].TargetGroupArn' \
+                  --output text)
+              else
+                TG_ARN=$EXISTING_TG_ARN
+              fi
+              
+              echo "::notice::Target group: $TG_ARN"
+              echo "SERVICE_${i}_TG_ARN=$TG_ARN" >> $GITHUB_ENV
+              
+              # Create listener rule
+              HOST_HEADER="$SERVICE_NAME.${{ env.TEAM_NAME }}.bp.elmhakathon.com"
+              
+              EXISTING_RULE_ARN=$(aws elbv2 describe-rules \
+                --listener-arn $LISTENER_ARN \
+                --region ${{ env.AWS_REGION }} \
+                --query "Rules[?Conditions[?Field=='host-header' && Values[?contains(@, '$HOST_HEADER')]].RuleArn]" \
+                --output text 2>/dev/null || echo "")
+              
+              if [ -z "$EXISTING_RULE_ARN" ]; then
+                echo "::notice::Creating listener rule for $HOST_HEADER with priority $NEXT_PRIORITY"
+                aws elbv2 create-rule \
+                  --listener-arn $LISTENER_ARN \
+                  --priority $NEXT_PRIORITY \
+                  --conditions Field=host-header,Values=$HOST_HEADER \
+                  --actions Type=forward,TargetGroupArn=$TG_ARN \
+                  --region ${{ env.AWS_REGION }} \
+                  --output text > /dev/null
+                NEXT_PRIORITY=$((NEXT_PRIORITY + 1))
+              fi
+              
+              echo "::notice::✅ ALB prepared for https://$HOST_HEADER"
+              echo "::endgroup::"
+            done
+          fi
+          echo "::endgroup::"
+
       - name: Deploy All Services to ECS
         run: |
           echo "::group::Deploying Services to ECS"
@@ -350,173 +485,54 @@ jobs:
                 --region ${{ env.AWS_REGION }}
             else
               echo "::notice::Creating new service..."
-              aws ecs create-service \
-                --cluster $CLUSTER_NAME \
-                --service-name $ECS_SERVICE \
-                --task-definition $TASK_FAMILY \
-                --desired-count 1 \
-                --launch-type FARGATE \
-                --platform-version LATEST \
-                --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_IDS],securityGroups=[$SECURITY_GROUP_ID],assignPublicIp=ENABLED}" \
-                --enable-execute-command \
-                --region ${{ env.AWS_REGION }}
+              
+              # Check if we have ALB configuration
+              if [ "${{ env.HAS_ALB }}" == "true" ]; then
+                TG_ARN=$(printenv SERVICE_${i}_TG_ARN || echo "")
+                if [ ! -z "$TG_ARN" ]; then
+                  echo "::notice::Creating service with ALB attachment"
+                  aws ecs create-service \
+                    --cluster $CLUSTER_NAME \
+                    --service-name $ECS_SERVICE \
+                    --task-definition $TASK_FAMILY \
+                    --desired-count 1 \
+                    --launch-type FARGATE \
+                    --platform-version LATEST \
+                    --load-balancers "targetGroupArn=$TG_ARN,containerName=$SERVICE_NAME,containerPort=$CONTAINER_PORT" \
+                    --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_IDS],securityGroups=[$SECURITY_GROUP_ID],assignPublicIp=ENABLED}" \
+                    --health-check-grace-period-seconds 60 \
+                    --enable-execute-command \
+                    --region ${{ env.AWS_REGION }}
+                else
+                  echo "::warning::No target group found, creating without ALB"
+                  aws ecs create-service \
+                    --cluster $CLUSTER_NAME \
+                    --service-name $ECS_SERVICE \
+                    --task-definition $TASK_FAMILY \
+                    --desired-count 1 \
+                    --launch-type FARGATE \
+                    --platform-version LATEST \
+                    --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_IDS],securityGroups=[$SECURITY_GROUP_ID],assignPublicIp=ENABLED}" \
+                    --enable-execute-command \
+                    --region ${{ env.AWS_REGION }}
+                fi
+              else
+                echo "::notice::Creating service without ALB (no ALB configured)"
+                aws ecs create-service \
+                  --cluster $CLUSTER_NAME \
+                  --service-name $ECS_SERVICE \
+                  --task-definition $TASK_FAMILY \
+                  --desired-count 1 \
+                  --launch-type FARGATE \
+                  --platform-version LATEST \
+                  --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_IDS],securityGroups=[$SECURITY_GROUP_ID],assignPublicIp=ENABLED}" \
+                  --enable-execute-command \
+                  --region ${{ env.AWS_REGION }}
+              fi
             fi
             
             echo "::endgroup::"
           done
-          echo "::endgroup::"
-
-      - name: Configure ALB Target Groups and Listener Rules
-        run: |
-          echo "::group::Configuring ALB Routing"
-          SERVICE_COUNT=${{ env.SERVICE_COUNT }}
-          CLUSTER_NAME="hackathon-cluster"
-          
-          # Get ALB details from the template service
-          echo "::notice::Getting ALB configuration from template service"
-          TEMPLATE_SERVICE=$(aws ecs describe-services \
-            --cluster $CLUSTER_NAME \
-            --services hackathon-expo-1st \
-            --region ${{ env.AWS_REGION }} \
-            --output json)
-          
-          # Extract load balancer info if service is attached to one
-          ALB_TARGET_GROUP_ARN=$(echo $TEMPLATE_SERVICE | jq -r '.services[0].loadBalancers[0].targetGroupArn // empty')
-          
-          if [ -z "$ALB_TARGET_GROUP_ARN" ]; then
-            echo "::warning::Template service not attached to ALB, skipping ALB configuration"
-            echo "::warning::Services will run but won't be accessible via domain names"
-            exit 0
-          fi
-          
-          # Get VPC ID from target group
-          VPC_ID=$(aws elbv2 describe-target-groups \
-            --target-group-arns $ALB_TARGET_GROUP_ARN \
-            --region ${{ env.AWS_REGION }} \
-            --query 'TargetGroups[0].VpcId' \
-            --output text)
-          
-          # Get ALB ARN from target group
-          ALB_ARN=$(aws elbv2 describe-target-groups \
-            --target-group-arns $ALB_TARGET_GROUP_ARN \
-            --region ${{ env.AWS_REGION }} \
-            --query 'TargetGroups[0].LoadBalancerArns[0]' \
-            --output text)
-          
-          # Get HTTPS listener ARN (port 443)
-          LISTENER_ARN=$(aws elbv2 describe-listeners \
-            --load-balancer-arn $ALB_ARN \
-            --region ${{ env.AWS_REGION }} \
-            --query 'Listeners[?Port==`443`].ListenerArn' \
-            --output text)
-          
-          if [ -z "$LISTENER_ARN" ]; then
-            echo "::warning::No HTTPS listener found on ALB, skipping ALB configuration"
-            exit 0
-          fi
-          
-          echo "::notice::VPC ID: $VPC_ID"
-          echo "::notice::ALB ARN: $ALB_ARN"
-          echo "::notice::Listener ARN: $LISTENER_ARN"
-          
-          # Get existing rules to determine next priority
-          EXISTING_PRIORITIES=$(aws elbv2 describe-rules \
-            --listener-arn $LISTENER_ARN \
-            --region ${{ env.AWS_REGION }} \
-            --query 'Rules[?Priority!=`default`].Priority' \
-            --output text | tr '\t' '\n' | sort -n | tail -1)
-          
-          if [ -z "$EXISTING_PRIORITIES" ]; then
-            NEXT_PRIORITY=1
-          else
-            NEXT_PRIORITY=$((EXISTING_PRIORITIES + 1))
-          fi
-          
-          echo "::notice::Starting priority: $NEXT_PRIORITY"
-          
-          # Configure each service
-          for i in $(seq 0 $((SERVICE_COUNT - 1))); do
-            SERVICE_NAME=$(printenv SERVICE_${i}_NAME)
-            CONTAINER_PORT=$(printenv SERVICE_${i}_PORT)
-            ECS_SERVICE="hackathon-${{ env.TEAM_NAME }}-$SERVICE_NAME"
-            
-            echo "::group::Configuring ALB for $SERVICE_NAME"
-            
-            # Target group name (max 32 chars, alphanumeric and hyphens only)
-            TG_NAME="tg-${{ env.TEAM_NAME }}-$SERVICE_NAME"
-            TG_NAME="${TG_NAME:0:32}"
-            
-            # Check if target group exists
-            EXISTING_TG_ARN=$(aws elbv2 describe-target-groups \
-              --region ${{ env.AWS_REGION }} \
-              --query "TargetGroups[?TargetGroupName=='$TG_NAME'].TargetGroupArn" \
-              --output text 2>/dev/null || echo "")
-            
-            if [ -z "$EXISTING_TG_ARN" ]; then
-              echo "::notice::Creating target group: $TG_NAME"
-              TG_ARN=$(aws elbv2 create-target-group \
-                --name $TG_NAME \
-                --protocol HTTP \
-                --port $CONTAINER_PORT \
-                --vpc-id $VPC_ID \
-                --target-type ip \
-                --health-check-enabled \
-                --health-check-path /health \
-                --health-check-interval-seconds 30 \
-                --health-check-timeout-seconds 5 \
-                --healthy-threshold-count 2 \
-                --unhealthy-threshold-count 3 \
-                --region ${{ env.AWS_REGION }} \
-                --query 'TargetGroups[0].TargetGroupArn' \
-                --output text)
-              
-              echo "::notice::Target group created: $TG_ARN"
-            else
-              TG_ARN=$EXISTING_TG_ARN
-              echo "::notice::Target group already exists: $TG_ARN"
-            fi
-            
-            # Update ECS service to attach to target group
-            echo "::notice::Attaching ECS service to target group"
-            aws ecs update-service \
-              --cluster $CLUSTER_NAME \
-              --service $ECS_SERVICE \
-              --load-balancers "targetGroupArn=$TG_ARN,containerName=$SERVICE_NAME,containerPort=$CONTAINER_PORT" \
-              --region ${{ env.AWS_REGION }} \
-              --output text > /dev/null || echo "::warning::Failed to attach load balancer, may already be attached"
-            
-            # Create listener rule for host-based routing
-            # Route: {service-name}.{team-name}.bp.elmhakathon.com -> target group
-            HOST_HEADER="$SERVICE_NAME.${{ env.TEAM_NAME }}.bp.elmhakathon.com"
-            
-            # Check if rule already exists
-            EXISTING_RULE_ARN=$(aws elbv2 describe-rules \
-              --listener-arn $LISTENER_ARN \
-              --region ${{ env.AWS_REGION }} \
-              --query "Rules[?Conditions[?Field=='host-header' && Values[?contains(@, '$HOST_HEADER')]].RuleArn]" \
-              --output text 2>/dev/null || echo "")
-            
-            if [ -z "$EXISTING_RULE_ARN" ]; then
-              echo "::notice::Creating listener rule for $HOST_HEADER"
-              RULE_ARN=$(aws elbv2 create-rule \
-                --listener-arn $LISTENER_ARN \
-                --priority $NEXT_PRIORITY \
-                --conditions Field=host-header,Values=$HOST_HEADER \
-                --actions Type=forward,TargetGroupArn=$TG_ARN \
-                --region ${{ env.AWS_REGION }} \
-                --query 'Rules[0].RuleArn' \
-                --output text)
-              
-              echo "::notice::Listener rule created with priority $NEXT_PRIORITY"
-              NEXT_PRIORITY=$((NEXT_PRIORITY + 1))
-            else
-              echo "::notice::Listener rule already exists for $HOST_HEADER"
-            fi
-            
-            echo "::notice::✅ ALB configured for https://$HOST_HEADER"
-            echo "::endgroup::"
-          done
-          
           echo "::endgroup::"
 
       - name: Wait for All Services to Stabilize
