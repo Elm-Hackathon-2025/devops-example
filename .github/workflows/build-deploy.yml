@@ -56,15 +56,7 @@ jobs:
       - name: Detect build method
         id: build-method
         run: |
-          if [ -f "docker-compose.yml" ] || [ -f "docker-compose.yaml" ]; then
-            echo "method=compose" >> $GITHUB_OUTPUT
-            echo "::notice::Found docker-compose file, will use docker compose build"
-            if [ -f "docker-compose.yml" ]; then
-              echo "file=docker-compose.yml" >> $GITHUB_OUTPUT
-            else
-              echo "file=docker-compose.yaml" >> $GITHUB_OUTPUT
-            fi
-          elif [ -f "Dockerfile.node" ]; then
+          if [ -f "Dockerfile.node" ]; then
             echo "method=dockerfile" >> $GITHUB_OUTPUT
             echo "file=Dockerfile.node" >> $GITHUB_OUTPUT
             echo "::notice::Found Dockerfile.node, will use docker build"
@@ -72,6 +64,14 @@ jobs:
             echo "method=dockerfile" >> $GITHUB_OUTPUT
             echo "file=Dockerfile" >> $GITHUB_OUTPUT
             echo "::notice::Found Dockerfile, will use docker build"
+          elif [ -f "docker-compose.yml" ] || [ -f "docker-compose.yaml" ]; then
+            echo "method=compose" >> $GITHUB_OUTPUT
+            echo "::notice::Found docker-compose file, will use docker compose build"
+            if [ -f "docker-compose.yml" ]; then
+              echo "file=docker-compose.yml" >> $GITHUB_OUTPUT
+            else
+              echo "file=docker-compose.yaml" >> $GITHUB_OUTPUT
+            fi
           else
             echo "::error::No Dockerfile or docker-compose file found"
             exit 1
