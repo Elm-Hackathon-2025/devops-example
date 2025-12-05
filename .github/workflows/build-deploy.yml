@@ -514,15 +514,16 @@ jobs:
             
             echo "::notice::Task definition registered: $TASK_DEF_ARN"
             
-            # Check if service exists
-            if aws ecs describe-services \
+            # Check if service exists and is ACTIVE
+            SERVICE_STATUS=$(aws ecs describe-services \
               --cluster $CLUSTER_NAME \
               --services $ECS_SERVICE \
               --region ${{ env.AWS_REGION }} \
-              --query 'services[0].serviceName' \
-              --output text 2>/dev/null | grep -q "$ECS_SERVICE"; then
-              
-              echo "::notice::Service exists, updating with new task definition..."
+              --query 'services[0].status' \
+              --output text 2>/dev/null || echo "NOT_FOUND")
+            
+            if [ "$SERVICE_STATUS" == "ACTIVE" ]; then
+              echo "::notice::Service exists and is ACTIVE, updating with new task definition..."
               aws ecs update-service \
                 --cluster $CLUSTER_NAME \
                 --service $ECS_SERVICE \
@@ -530,6 +531,9 @@ jobs:
                 --force-new-deployment \
                 --region ${{ env.AWS_REGION }}
             else
+              if [ "$SERVICE_STATUS" != "NOT_FOUND" ] && [ "$SERVICE_STATUS" != "None" ]; then
+                echo "::warning::Service exists but status is $SERVICE_STATUS, will recreate"
+              fi
               echo "::notice::Creating new service..."
               
               # Check if we have ALB configuration
