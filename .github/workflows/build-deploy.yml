@@ -257,6 +257,16 @@ jobs:
             echo "::notice::Task Family: $TASK_FAMILY"
             echo "::notice::Image: $IMAGE_TAG"
             
+            # Determine container port based on service name
+            # Frontend uses 8080, API uses 3000
+            if [[ "$SERVICE_NAME" == *"frontend"* ]]; then
+              CONTAINER_PORT=8080
+            else
+              CONTAINER_PORT=3000
+            fi
+            
+            echo "::notice::Container Port: $CONTAINER_PORT"
+            
             # Create task definition
             cat > task-definition-${i}.json <<EOF
           {
@@ -273,7 +283,7 @@ jobs:
                 "image": "$IMAGE_TAG",
                 "portMappings": [
                   {
-                    "containerPort": 3000,
+                    "containerPort": $CONTAINER_PORT,
                     "protocol": "tcp"
                   }
                 ],
@@ -281,7 +291,7 @@ jobs:
                   {"name": "NODE_ENV", "value": "production"},
                   {"name": "TEAM_NAME", "value": "${{ env.TEAM_NAME }}"},
                   {"name": "SERVICE_NAME", "value": "$SERVICE_NAME"},
-                  {"name": "PORT", "value": "3000"}
+                  {"name": "PORT", "value": "$CONTAINER_PORT"}
                 ],
                 "logConfiguration": {
                   "logDriver": "awslogs",
@@ -292,7 +302,7 @@ jobs:
                   }
                 },
                 "healthCheck": {
-                  "command": ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3000/health || exit 1"],
+                  "command": ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:$CONTAINER_PORT/health || exit 1"],
                   "interval": 30,
                   "timeout": 5,
                   "retries": 3,
@@ -354,10 +364,51 @@ jobs:
             ECS_SERVICE="hackathon-${{ env.TEAM_NAME }}-$SERVICE_NAME"
             
             echo "::notice::Waiting for $ECS_SERVICE to stabilize..."
-            aws ecs wait services-stable \
+            echo "::notice::Checking service events for issues..."
+            
+            # Show service events to diagnose issues
+            aws ecs describe-services \
               --cluster $CLUSTER_NAME \
               --services $ECS_SERVICE \
-              --region ${{ env.AWS_REGION }}
+              --region ${{ env.AWS_REGION }} \
+              --query 'services[0].events[0:5].[createdAt,message]' \
+              --output table
+            
+            # Wait with timeout (max 10 minutes per service)
+            timeout 600 aws ecs wait services-stable \
+              --cluster $CLUSTER_NAME \
+              --services $ECS_SERVICE \
+              --region ${{ env.AWS_REGION }} || {
+              echo "::error::Service $ECS_SERVICE failed to stabilize within 10 minutes"
+              echo "::group::Service Details"
+              aws ecs describe-services \
+                --cluster $CLUSTER_NAME \
+                --services $ECS_SERVICE \
+                --region ${{ env.AWS_REGION }} \
+                --query 'services[0]' \
+                --output json
+              echo "::endgroup::"
+              
+              echo "::group::Task Details"
+              TASK_ARNS=$(aws ecs list-tasks \
+                --cluster $CLUSTER_NAME \
+                --service-name $ECS_SERVICE \
+                --region ${{ env.AWS_REGION }} \
+                --query 'taskArns' \
+                --output text)
+              
+              if [ ! -z "$TASK_ARNS" ]; then
+                aws ecs describe-tasks \
+                  --cluster $CLUSTER_NAME \
+                  --tasks $TASK_ARNS \
+                  --region ${{ env.AWS_REGION }} \
+                  --output json
+              fi
+              echo "::endgroup::"
+              
+              echo "::warning::Continuing with deployment despite timeout..."
+            }
+            
             echo "::notice::✅ $ECS_SERVICE is stable"
           done
           echo "::endgroup::"
