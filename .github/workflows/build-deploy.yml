@@ -58,7 +58,7 @@ jobs:
         run: |
           if [ -f "docker-compose.yml" ] || [ -f "docker-compose.yaml" ]; then
             echo "method=compose" >> $GITHUB_OUTPUT
-            echo "::notice::Found docker-compose file, will use docker-compose build"
+            echo "::notice::Found docker-compose file, will use docker compose build"
             if [ -f "docker-compose.yml" ]; then
               echo "file=docker-compose.yml" >> $GITHUB_OUTPUT
             else
@@ -89,28 +89,28 @@ jobs:
           echo "::notice::Image tags: $IMAGE_TAG, $IMAGE_TAG_REPO, $IMAGE_TAG_SHA"
           
           if [ "${{ steps.build-method.outputs.method }}" == "compose" ]; then
-            # Build using docker-compose
-            echo "::notice::Building with docker-compose..."
+            # Build using docker compose (v2 syntax)
+            echo "::notice::Building with docker compose..."
             
-            # Export environment variables for docker-compose
+            # Export environment variables for docker compose
             export TEAM_NAME=${{ env.TEAM_NAME }}
             export REPO_NAME=${{ env.REPO_NAME }}
             export IMAGE_TAG=$IMAGE_TAG
             
             # Build the app service (or first service)
-            docker-compose -f ${{ steps.build-method.outputs.file }} build app || \
-            docker-compose -f ${{ steps.build-method.outputs.file }} build $(docker-compose -f ${{ steps.build-method.outputs.file }} config --services | head -n1)
+            docker compose -f ${{ steps.build-method.outputs.file }} build app || \
+            docker compose -f ${{ steps.build-method.outputs.file }} build $(docker compose -f ${{ steps.build-method.outputs.file }} config --services | head -n1)
             
             # Get the built image name
-            COMPOSE_IMAGE=$(docker-compose -f ${{ steps.build-method.outputs.file }} config | grep 'image:' | head -n1 | awk '{print $2}')
+            COMPOSE_IMAGE=$(docker compose -f ${{ steps.build-method.outputs.file }} config | grep 'image:' | head -n1 | awk '{print $2}')
             
             if [ -z "$COMPOSE_IMAGE" ]; then
               # If no image name in compose, use the service name
-              SERVICE_NAME=$(docker-compose -f ${{ steps.build-method.outputs.file }} config --services | head -n1)
+              SERVICE_NAME=$(docker compose -f ${{ steps.build-method.outputs.file }} config --services | head -n1)
               COMPOSE_IMAGE="${PWD##*/}_${SERVICE_NAME}"
             fi
             
-            echo "::notice::Tagging image from docker-compose: $COMPOSE_IMAGE"
+            echo "::notice::Tagging image from docker compose: $COMPOSE_IMAGE"
             docker tag $COMPOSE_IMAGE $IMAGE_TAG
             docker tag $COMPOSE_IMAGE $IMAGE_TAG_REPO
             docker tag $COMPOSE_IMAGE $IMAGE_TAG_SHA
