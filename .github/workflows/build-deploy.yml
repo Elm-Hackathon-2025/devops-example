@@ -102,18 +102,28 @@ jobs:
             COMPOSE_SERVICE_NAME=$(echo $SERVICES | jq -r ".[$i]")
             echo "::group::Processing compose service: $COMPOSE_SERVICE_NAME"
             
-            # Extract SERVICE_NAME from docker-compose environment variables
-            # This is the actual service identifier (e.g., test-api, test-frontend)
-            SERVICE_NAME=$(docker compose -f ${{ steps.detect-services.outputs.file }} config | \
-              grep -A 20 "^  $COMPOSE_SERVICE_NAME:" | \
-              grep "SERVICE_NAME:" | \
-              sed 's/.*SERVICE_NAME:-\([^}]*\).*/\1/' | \
-              head -1)
-            
-            # If no SERVICE_NAME env var found, use compose service name
-            if [ -z "$SERVICE_NAME" ]; then
-              SERVICE_NAME="$COMPOSE_SERVICE_NAME"
-            fi
+            # Map compose service names to deployment service names
+            # By default, prefix with "test-" to match docker-compose SERVICE_NAME env vars
+            case "$COMPOSE_SERVICE_NAME" in
+              api)
+                SERVICE_NAME="test-api"
+                ;;
+              frontend)
+                SERVICE_NAME="test-frontend"
+                ;;
+              *)
+                # For other services, check if there's a SERVICE_NAME env var
+                SERVICE_NAME=$(docker compose -f ${{ steps.detect-services.outputs.file }} config 2>/dev/null | \
+                  grep -A 30 "  $COMPOSE_SERVICE_NAME:" | \
+                  grep "SERVICE_NAME" | \
+                  grep -oE 'test-[a-zA-Z0-9_-]+' | \
+                  head -1)
+                # If not found, use compose service name as-is
+                if [ -z "$SERVICE_NAME" ]; then
+                  SERVICE_NAME="$COMPOSE_SERVICE_NAME"
+                fi
+                ;;
+            esac
             
             echo "::notice::Compose service: $COMPOSE_SERVICE_NAME"
             echo "::notice::Deployment service name: $SERVICE_NAME"
