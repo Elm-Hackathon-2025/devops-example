@@ -231,6 +231,26 @@ jobs:
           
           echo "::notice::Creating task definition: $TASK_FAMILY"
           
+          # Get IAM role ARNs from existing task definition
+          echo "::notice::Getting IAM roles from existing task definition"
+          TEMPLATE_TASK_DEF=$(aws ecs describe-services \
+            --cluster $CLUSTER_NAME \
+            --services hackathon-expo-1st \
+            --region ${{ env.AWS_REGION }} \
+            --query 'services[0].taskDefinition' \
+            --output text)
+          
+          ROLE_ARNS=$(aws ecs describe-task-definition \
+            --task-definition $TEMPLATE_TASK_DEF \
+            --region ${{ env.AWS_REGION }} \
+            --output json | jq -r '{executionRole: .taskDefinition.executionRoleArn, taskRole: .taskDefinition.taskRoleArn}')
+          
+          EXECUTION_ROLE_ARN=$(echo $ROLE_ARNS | jq -r '.executionRole')
+          TASK_ROLE_ARN=$(echo $ROLE_ARNS | jq -r '.taskRole')
+          
+          echo "::notice::Execution Role: $EXECUTION_ROLE_ARN"
+          echo "::notice::Task Role: $TASK_ROLE_ARN"
+          
           # Create task definition
           cat > task-definition.json <<EOF
           {
@@ -239,8 +259,8 @@ jobs:
             "requiresCompatibilities": ["FARGATE"],
             "cpu": "256",
             "memory": "512",
-            "executionRoleArn": "arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/hackathon-ecs-execution-role",
-            "taskRoleArn": "arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/hackathon-ecs-task-role",
+            "executionRoleArn": "$EXECUTION_ROLE_ARN",
+            "taskRoleArn": "$TASK_ROLE_ARN",
             "containerDefinitions": [
               {
                 "name": "${{ env.REPO_NAME }}",
