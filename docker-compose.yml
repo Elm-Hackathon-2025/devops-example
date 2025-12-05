@@ -11,7 +11,7 @@ services:
       - NODE_ENV=production
       - PORT=3000
       - TEAM_NAME=${TEAM_NAME:-expo-1st}
-      - SERVICE_NAME=${SERVICE_NAME:-api}
+      - SERVICE_NAME=${SERVICE_NAME:-test}
       - DB_HOST=postgres
       - DB_PORT=5432
       - DB_NAME=hackathon
