@@ -1,4 +1,4 @@
-name: Build and Deploy to ECS
+name: Build and Deploy to EKS
 
 on:
   workflow_dispatch:
@@ -14,6 +14,7 @@ on:
 
 env:
   AWS_REGION: ap-southeast-1
+  EKS_CLUSTER_NAME: k8s-hakathon-prod
   # Team name is set from input or defaults to expo-1st
   TEAM_NAME: ${{ github.event.inputs.team_name || 'expo-1st' }}
 
@@ -148,19 +149,6 @@ jobs:
               echo "::notice::ECR repository already exists: $ECR_REPO"
             fi
             
-            # Ensure CloudWatch Log Group Exists
-            LOG_GROUP="/ecs/hackathon/${{ env.TEAM_NAME }}/$SERVICE_NAME"
-            if aws logs describe-log-groups --log-group-name-prefix "$LOG_GROUP" --region ${{ env.AWS_REGION }} --query "logGroups[?logGroupName=='$LOG_GROUP'].logGroupName" --output text | grep -q "$LOG_GROUP"; then
-              echo "::notice::Log group already exists: $LOG_GROUP"
-            else
-              echo "::notice::Creating log group: $LOG_GROUP"
-              if aws logs create-log-group --log-group-name "$LOG_GROUP" --region ${{ env.AWS_REGION }} 2>&1; then
-                aws logs put-retention-policy --log-group-name "$LOG_GROUP" --retention-in-days 7 --region ${{ env.AWS_REGION }} || true
-              else
-                echo "::notice::Log group may already exist (race condition), continuing..."
-              fi
-            fi
-            
             # Build based on method
             if [ "$BUILD_METHOD" == "compose" ]; then
               echo "::notice::Building with docker compose..."
@@ -196,39 +184,9 @@ jobs:
             
             # Store service info for deployment step
             echo "SERVICE_${i}_NAME=$SERVICE_NAME" >> $GITHUB_ENV
+            echo "SERVICE_${i}_COMPOSE_NAME=$COMPOSE_SERVICE_NAME" >> $GITHUB_ENV
             echo "SERVICE_${i}_ECR_REPO=$ECR_REPO" >> $GITHUB_ENV
             echo "SERVICE_${i}_IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
-            
-            # Extract container port from docker-compose
-            if [ "$BUILD_METHOD" == "compose" ]; then
-              # Try to extract port from docker compose config
-              # First try the expanded format (target: 8080)
-              CONTAINER_PORT=$(docker compose -f ${{ steps.detect-services.outputs.file }} config 2>/dev/null | \
-                grep -A 30 "  $COMPOSE_SERVICE_NAME:" | \
-                grep -E "^\s+target:\s+[0-9]+" | \
-                head -1 | \
-                grep -oE '[0-9]+')
-              
-              # If not found, try the short format ("8080:8080")
-              if [ -z "$CONTAINER_PORT" ]; then
-                CONTAINER_PORT=$(docker compose -f ${{ steps.detect-services.outputs.file }} config 2>/dev/null | \
-                  grep -A 30 "  $COMPOSE_SERVICE_NAME:" | \
-                  grep -E "^\s+- \"[0-9]+:[0-9]+\"" | \
-                  head -1 | \
-                  grep -oE '[0-9]+:[0-9]+' | \
-                  cut -d':' -f2)
-              fi
-              
-              # If still no port found, default to 3000
-              if [ -z "$CONTAINER_PORT" ]; then
-                CONTAINER_PORT=3000
-              fi
-            else
-              CONTAINER_PORT=3000
-            fi
-            
-            echo "SERVICE_${i}_PORT=$CONTAINER_PORT" >> $GITHUB_ENV
-            echo "::notice::Container port: $CONTAINER_PORT"
             
             echo "::endgroup::"
           done
@@ -237,411 +195,116 @@ jobs:
           echo "SERVICE_COUNT=$SERVICE_COUNT" >> $GITHUB_ENV
           echo "::endgroup::"
 
-      - name: Prepare ALB Target Groups and Listener Rules
+      - name: Configure kubectl for EKS
         run: |
-          echo "::group::Preparing ALB Routing"
-          SERVICE_COUNT=${{ env.SERVICE_COUNT }}
-          CLUSTER_NAME="hackathon-cluster"
+          echo "::group::Configuring kubectl for EKS"
+          echo "::notice::Updating kubeconfig for cluster: ${{ env.EKS_CLUSTER_NAME }}"
+          aws eks update-kubeconfig \
+            --name ${{ env.EKS_CLUSTER_NAME }} \
+            --region ${{ env.AWS_REGION }}
           
-          # Get ALB details from the template service
-          echo "::notice::Getting ALB configuration from template service"
-          TEMPLATE_SERVICE=$(aws ecs describe-services \
-            --cluster $CLUSTER_NAME \
-            --services hackathon-expo-1st \
-            --region ${{ env.AWS_REGION }} \
-            --output json)
+          echo "::notice::Verifying connection to cluster..."
+          kubectl cluster-info
+          kubectl get nodes
           
-          # Extract load balancer info if service is attached to one
-          ALB_TARGET_GROUP_ARN=$(echo $TEMPLATE_SERVICE | jq -r '.services[0].loadBalancers[0].targetGroupArn // empty')
-          
-          if [ -z "$ALB_TARGET_GROUP_ARN" ]; then
-            echo "::warning::Template service not attached to ALB, skipping ALB configuration"
-            echo "HAS_ALB=false" >> $GITHUB_ENV
+          echo "::notice::Verifying namespace team-${{ env.TEAM_NAME }} exists..."
+          if ! kubectl get namespace team-${{ env.TEAM_NAME }} >/dev/null 2>&1; then
+            echo "::warning::Namespace team-${{ env.TEAM_NAME }} does not exist, creating it..."
+            kubectl create namespace team-${{ env.TEAM_NAME }}
           else
-            echo "HAS_ALB=true" >> $GITHUB_ENV
-            
-            # Get VPC ID from target group
-            VPC_ID=$(aws elbv2 describe-target-groups \
-              --target-group-arns $ALB_TARGET_GROUP_ARN \
-              --region ${{ env.AWS_REGION }} \
-              --query 'TargetGroups[0].VpcId' \
-              --output text)
-            
-            # Get ALB ARN from target group
-            ALB_ARN=$(aws elbv2 describe-target-groups \
-              --target-group-arns $ALB_TARGET_GROUP_ARN \
-              --region ${{ env.AWS_REGION }} \
-              --query 'TargetGroups[0].LoadBalancerArns[0]' \
-              --output text)
-            
-            # Get HTTPS listener ARN (port 443)
-            LISTENER_ARN=$(aws elbv2 describe-listeners \
-              --load-balancer-arn $ALB_ARN \
-              --region ${{ env.AWS_REGION }} \
-              --query 'Listeners[?Port==`443`].ListenerArn' \
-              --output text)
-            
-            echo "VPC_ID=$VPC_ID" >> $GITHUB_ENV
-            echo "ALB_ARN=$ALB_ARN" >> $GITHUB_ENV
-            echo "LISTENER_ARN=$LISTENER_ARN" >> $GITHUB_ENV
-            
-            echo "::notice::VPC ID: $VPC_ID"
-            echo "::notice::ALB ARN: $ALB_ARN"
-            echo "::notice::Listener ARN: $LISTENER_ARN"
-            
-            # Get existing rules to determine next priority
-            EXISTING_PRIORITIES=$(aws elbv2 describe-rules \
-              --listener-arn $LISTENER_ARN \
-              --region ${{ env.AWS_REGION }} \
-              --query 'Rules[?Priority!=`default`].Priority' \
-              --output text | tr '\t' '\n' | sort -n | tail -1)
-            
-            if [ -z "$EXISTING_PRIORITIES" ]; then
-              NEXT_PRIORITY=1
-            else
-              NEXT_PRIORITY=$((EXISTING_PRIORITIES + 1))
-            fi
-            
-            echo "::notice::Starting priority: $NEXT_PRIORITY"
-            
-            # Create target groups and listener rules for each service
-            for i in $(seq 0 $((SERVICE_COUNT - 1))); do
-              SERVICE_NAME=$(printenv SERVICE_${i}_NAME)
-              CONTAINER_PORT=$(printenv SERVICE_${i}_PORT)
-              
-              echo "::group::Preparing ALB for $SERVICE_NAME"
-              
-              # Target group name (max 32 chars)
-              TG_NAME="tg-${{ env.TEAM_NAME }}-$SERVICE_NAME"
-              TG_NAME="${TG_NAME:0:32}"
-              
-              # Check if target group exists and verify its port
-              EXISTING_TG_INFO=$(aws elbv2 describe-target-groups \
-                --region ${{ env.AWS_REGION }} \
-                --query "TargetGroups[?TargetGroupName=='$TG_NAME'].[TargetGroupArn,Port]" \
-                --output text 2>/dev/null || echo "")
-              
-              if [ -z "$EXISTING_TG_INFO" ]; then
-                echo "::notice::Creating target group: $TG_NAME on port $CONTAINER_PORT"
-                TG_ARN=$(aws elbv2 create-target-group \
-                  --name $TG_NAME \
-                  --protocol HTTP \
-                  --port $CONTAINER_PORT \
-                  --vpc-id $VPC_ID \
-                  --target-type ip \
-                  --health-check-enabled \
-                  --health-check-path /health \
-                  --health-check-interval-seconds 30 \
-                  --health-check-timeout-seconds 5 \
-                  --healthy-threshold-count 2 \
-                  --unhealthy-threshold-count 3 \
-                  --region ${{ env.AWS_REGION }} \
-                  --query 'TargetGroups[0].TargetGroupArn' \
-                  --output text)
-              else
-                EXISTING_TG_ARN=$(echo "$EXISTING_TG_INFO" | awk '{print $1}')
-                EXISTING_PORT=$(echo "$EXISTING_TG_INFO" | awk '{print $2}')
-                
-                if [ "$EXISTING_PORT" != "$CONTAINER_PORT" ]; then
-                  echo "::warning::Target group exists with wrong port $EXISTING_PORT (need $CONTAINER_PORT)"
-                  echo "::notice::Deleting and recreating target group with correct port"
-                  
-                  # Delete old target group (this will also remove it from listener rules)
-                  aws elbv2 delete-target-group \
-                    --target-group-arn $EXISTING_TG_ARN \
-                    --region ${{ env.AWS_REGION }} || true
-                  
-                  sleep 5
-                  
-                  # Create new target group with correct port
-                  TG_ARN=$(aws elbv2 create-target-group \
-                    --name $TG_NAME \
-                    --protocol HTTP \
-                    --port $CONTAINER_PORT \
-                    --vpc-id $VPC_ID \
-                    --target-type ip \
-                    --health-check-enabled \
-                    --health-check-path /health \
-                    --health-check-interval-seconds 30 \
-                    --health-check-timeout-seconds 5 \
-                    --healthy-threshold-count 2 \
-                    --unhealthy-threshold-count 3 \
-                    --region ${{ env.AWS_REGION }} \
-                    --query 'TargetGroups[0].TargetGroupArn' \
-                    --output text)
-                  
-                  echo "::notice::Target group recreated with correct port: $CONTAINER_PORT"
-                else
-                  TG_ARN=$EXISTING_TG_ARN
-                  echo "::notice::Target group already exists with correct port: $CONTAINER_PORT"
-                fi
-              fi
-              
-              echo "::notice::Target group: $TG_ARN"
-              echo "SERVICE_${i}_TG_ARN=$TG_ARN" >> $GITHUB_ENV
-              
-              # Create listener rule
-              HOST_HEADER="$SERVICE_NAME.${{ env.TEAM_NAME }}.bp.elmhakathon.com"
-              
-              EXISTING_RULE_ARN=$(aws elbv2 describe-rules \
-                --listener-arn $LISTENER_ARN \
-                --region ${{ env.AWS_REGION }} \
-                --query "Rules[?Conditions[?Field=='host-header' && Values[?contains(@, '$HOST_HEADER')]].RuleArn]" \
-                --output text 2>/dev/null || echo "")
-              
-              if [ -z "$EXISTING_RULE_ARN" ]; then
-                echo "::notice::Creating listener rule for $HOST_HEADER with priority $NEXT_PRIORITY"
-                aws elbv2 create-rule \
-                  --listener-arn $LISTENER_ARN \
-                  --priority $NEXT_PRIORITY \
-                  --conditions Field=host-header,Values=$HOST_HEADER \
-                  --actions Type=forward,TargetGroupArn=$TG_ARN \
-                  --region ${{ env.AWS_REGION }} \
-                  --output text > /dev/null
-                NEXT_PRIORITY=$((NEXT_PRIORITY + 1))
-              fi
-              
-              echo "::notice::✅ ALB prepared for https://$HOST_HEADER"
-              echo "::endgroup::"
-            done
+            echo "::notice::✅ Namespace team-${{ env.TEAM_NAME }} exists"
           fi
           echo "::endgroup::"
 
-      - name: Deploy All Services to ECS
+      - name: Deploy All Services to EKS with Helm
         run: |
-          echo "::group::Deploying Services to ECS"
+          echo "::group::Deploying Services to EKS"
           SERVICE_COUNT=${{ env.SERVICE_COUNT }}
-          CLUSTER_NAME="hackathon-cluster"
-          
-          # Get IAM role ARNs and network config from template service (once)
-          echo "::notice::Getting IAM roles and network config from template service"
-          TEMPLATE_TASK_DEF=$(aws ecs describe-services \
-            --cluster $CLUSTER_NAME \
-            --services hackathon-expo-1st \
-            --region ${{ env.AWS_REGION }} \
-            --query 'services[0].taskDefinition' \
-            --output text)
-          
-          ROLE_ARNS=$(aws ecs describe-task-definition \
-            --task-definition $TEMPLATE_TASK_DEF \
-            --region ${{ env.AWS_REGION }} \
-            --output json | jq -r '{executionRole: .taskDefinition.executionRoleArn, taskRole: .taskDefinition.taskRoleArn}')
-          
-          EXECUTION_ROLE_ARN=$(echo $ROLE_ARNS | jq -r '.executionRole')
-          TASK_ROLE_ARN=$(echo $ROLE_ARNS | jq -r '.taskRole')
-          
-          NETWORK_CONFIG=$(aws ecs describe-services \
-            --cluster $CLUSTER_NAME \
-            --services hackathon-expo-1st \
-            --region ${{ env.AWS_REGION }} \
-            --query 'services[0].networkConfiguration.awsvpcConfiguration' \
-            --output json)
-          
-          SUBNET_IDS=$(echo $NETWORK_CONFIG | jq -r '.subnets | join(",")')
-          SECURITY_GROUP_ID=$(echo $NETWORK_CONFIG | jq -r '.securityGroups[0]')
-          
-          echo "::notice::Using Execution Role: $EXECUTION_ROLE_ARN"
-          echo "::notice::Using Task Role: $TASK_ROLE_ARN"
-          echo "::notice::Using Subnets: $SUBNET_IDS"
-          echo "::notice::Using Security Group: $SECURITY_GROUP_ID"
+          ECR_REGISTRY="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
           
           for i in $(seq 0 $((SERVICE_COUNT - 1))); do
             SERVICE_NAME=$(printenv SERVICE_${i}_NAME)
+            COMPOSE_SERVICE_NAME=$(printenv SERVICE_${i}_COMPOSE_NAME)
             ECR_REPO=$(printenv SERVICE_${i}_ECR_REPO)
-            IMAGE_TAG=$(printenv SERVICE_${i}_IMAGE_TAG)
-            CONTAINER_PORT=$(printenv SERVICE_${i}_PORT)
-            
-            ECS_SERVICE="hackathon-${{ env.TEAM_NAME }}-$SERVICE_NAME"
-            TASK_FAMILY="hackathon-${{ env.TEAM_NAME }}-$SERVICE_NAME"
             
             echo "::group::Deploying service: $SERVICE_NAME"
-            echo "::notice::ECS Service: $ECS_SERVICE"
-            echo "::notice::Task Family: $TASK_FAMILY"
-            echo "::notice::Image: $IMAGE_TAG"
-            echo "::notice::Container Port: $CONTAINER_PORT"
+            echo "::notice::Compose service: $COMPOSE_SERVICE_NAME"
+            echo "::notice::K8s service name: $SERVICE_NAME"
+            echo "::notice::ECR repository: $ECR_REPO"
+            echo "::notice::Image tag: ${{ github.sha }}"
             
-            # Create task definition
-            cat > task-definition-${i}.json <<EOF
-          {
-            "family": "$TASK_FAMILY",
-            "networkMode": "awsvpc",
-            "requiresCompatibilities": ["FARGATE"],
-            "cpu": "256",
-            "memory": "512",
-            "executionRoleArn": "$EXECUTION_ROLE_ARN",
-            "taskRoleArn": "$TASK_ROLE_ARN",
-            "containerDefinitions": [
-              {
-                "name": "$SERVICE_NAME",
-                "image": "$IMAGE_TAG",
-                "portMappings": [
-                  {
-                    "containerPort": $CONTAINER_PORT,
-                    "protocol": "tcp"
-                  }
-                ],
-                "environment": [
-                  {"name": "NODE_ENV", "value": "production"},
-                  {"name": "TEAM_NAME", "value": "${{ env.TEAM_NAME }}"},
-                  {"name": "SERVICE_NAME", "value": "$SERVICE_NAME"},
-                  {"name": "PORT", "value": "$CONTAINER_PORT"}
-                ],
-                "logConfiguration": {
-                  "logDriver": "awslogs",
-                  "options": {
-                    "awslogs-group": "/ecs/hackathon/${{ env.TEAM_NAME }}/$SERVICE_NAME",
-                    "awslogs-region": "${{ env.AWS_REGION }}",
-                    "awslogs-stream-prefix": "ecs"
-                  }
-                },
-                "healthCheck": {
-                  "command": ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:$CONTAINER_PORT/health || exit 1"],
-                  "interval": 30,
-                  "timeout": 5,
-                  "retries": 3,
-                  "startPeriod": 60
-                }
-              }
-            ]
-          }
-          EOF
-            
-            # Register task definition
-            TASK_DEF_ARN=$(aws ecs register-task-definition \
-              --cli-input-json file://task-definition-${i}.json \
-              --query 'taskDefinition.taskDefinitionArn' \
-              --output text)
-            
-            echo "::notice::Task definition registered: $TASK_DEF_ARN"
-            
-            # Check if service exists and is ACTIVE
-            SERVICE_STATUS=$(aws ecs describe-services \
-              --cluster $CLUSTER_NAME \
-              --services $ECS_SERVICE \
-              --region ${{ env.AWS_REGION }} \
-              --query 'services[0].status' \
-              --output text 2>/dev/null || echo "NOT_FOUND")
-            
-            if [ "$SERVICE_STATUS" == "ACTIVE" ]; then
-              echo "::notice::Service exists and is ACTIVE, updating with new task definition..."
-              aws ecs update-service \
-                --cluster $CLUSTER_NAME \
-                --service $ECS_SERVICE \
-                --task-definition $TASK_DEF_ARN \
-                --force-new-deployment \
-                --region ${{ env.AWS_REGION }}
+            # Check if service-specific values file exists
+            VALUES_FILE="deploy/values.${COMPOSE_SERVICE_NAME}.yaml"
+            if [ ! -f "$VALUES_FILE" ]; then
+              echo "::warning::Service-specific values file not found: $VALUES_FILE"
+              echo "::notice::Using default values.yaml with overrides"
+              VALUES_FILE="deploy/values.yaml"
             else
-              if [ "$SERVICE_STATUS" != "NOT_FOUND" ] && [ "$SERVICE_STATUS" != "None" ]; then
-                echo "::warning::Service exists but status is $SERVICE_STATUS, will recreate"
-              fi
-              echo "::notice::Creating new service..."
-              
-              # Check if we have ALB configuration
-              if [ "${{ env.HAS_ALB }}" == "true" ]; then
-                TG_ARN=$(printenv SERVICE_${i}_TG_ARN || echo "")
-                if [ ! -z "$TG_ARN" ]; then
-                  echo "::notice::Creating service with ALB attachment"
-                  aws ecs create-service \
-                    --cluster $CLUSTER_NAME \
-                    --service-name $ECS_SERVICE \
-                    --task-definition $TASK_FAMILY \
-                    --desired-count 1 \
-                    --launch-type FARGATE \
-                    --platform-version LATEST \
-                    --load-balancers "targetGroupArn=$TG_ARN,containerName=$SERVICE_NAME,containerPort=$CONTAINER_PORT" \
-                    --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_IDS],securityGroups=[$SECURITY_GROUP_ID],assignPublicIp=ENABLED}" \
-                    --health-check-grace-period-seconds 60 \
-                    --enable-execute-command \
-                    --region ${{ env.AWS_REGION }}
-                else
-                  echo "::warning::No target group found, creating without ALB"
-                  aws ecs create-service \
-                    --cluster $CLUSTER_NAME \
-                    --service-name $ECS_SERVICE \
-                    --task-definition $TASK_FAMILY \
-                    --desired-count 1 \
-                    --launch-type FARGATE \
-                    --platform-version LATEST \
-                    --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_IDS],securityGroups=[$SECURITY_GROUP_ID],assignPublicIp=ENABLED}" \
-                    --enable-execute-command \
-                    --region ${{ env.AWS_REGION }}
-                fi
-              else
-                echo "::notice::Creating service without ALB (no ALB configured)"
-                aws ecs create-service \
-                  --cluster $CLUSTER_NAME \
-                  --service-name $ECS_SERVICE \
-                  --task-definition $TASK_FAMILY \
-                  --desired-count 1 \
-                  --launch-type FARGATE \
-                  --platform-version LATEST \
-                  --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_IDS],securityGroups=[$SECURITY_GROUP_ID],assignPublicIp=ENABLED}" \
-                  --enable-execute-command \
-                  --region ${{ env.AWS_REGION }}
-              fi
+              echo "::notice::Using service-specific values: $VALUES_FILE"
             fi
             
+            # Determine ingress hostname based on service name
+            case "$SERVICE_NAME" in
+              *frontend*|*app*)
+                HOSTNAME="app.${{ env.TEAM_NAME }}.bp.elmhakathon.com"
+                ;;
+              *backend*|*api*)
+                HOSTNAME="api.${{ env.TEAM_NAME }}.bp.elmhakathon.com"
+                ;;
+              *)
+                HOSTNAME="$SERVICE_NAME.${{ env.TEAM_NAME }}.bp.elmhakathon.com"
+                ;;
+            esac
+            
+            echo "::notice::Ingress hostname: $HOSTNAME"
+            
+            # Deploy with Helm template + kubectl apply
+            echo "::notice::Rendering Helm template and applying to cluster..."
+            helm template $SERVICE_NAME ./deploy \
+              -f $VALUES_FILE \
+              --set teamName=${{ env.TEAM_NAME }} \
+              --set service.name=$SERVICE_NAME \
+              --set image.registry=$ECR_REGISTRY \
+              --set image.repository=$ECR_REPO \
+              --set image.tag=${{ github.sha }} \
+              --set ingress.hostname=$HOSTNAME | kubectl apply -f -
+            
+            echo "::notice::✅ Deployed $SERVICE_NAME to namespace team-${{ env.TEAM_NAME }}"
+            echo "::notice::🌐 URL: https://$HOSTNAME"
             echo "::endgroup::"
           done
           echo "::endgroup::"
 
-      - name: Wait for All Services to Stabilize
+      - name: Wait for All Deployments to Roll Out
         run: |
-          echo "::group::Waiting for Services to Stabilize"
+          echo "::group::Waiting for Deployments to Roll Out"
           SERVICE_COUNT=${{ env.SERVICE_COUNT }}
-          CLUSTER_NAME="hackathon-cluster"
           
           for i in $(seq 0 $((SERVICE_COUNT - 1))); do
             SERVICE_NAME=$(printenv SERVICE_${i}_NAME)
-            ECS_SERVICE="hackathon-${{ env.TEAM_NAME }}-$SERVICE_NAME"
             
-            echo "::notice::Waiting for $ECS_SERVICE to stabilize..."
-            echo "::notice::Checking service events for issues..."
+            echo "::notice::Waiting for deployment/$SERVICE_NAME to roll out..."
             
-            # Show service events to diagnose issues
-            aws ecs describe-services \
-              --cluster $CLUSTER_NAME \
-              --services $ECS_SERVICE \
-              --region ${{ env.AWS_REGION }} \
-              --query 'services[0].events[0:5].[createdAt,message]' \
-              --output table
-            
-            # Wait with timeout (max 10 minutes per service)
-            timeout 600 aws ecs wait services-stable \
-              --cluster $CLUSTER_NAME \
-              --services $ECS_SERVICE \
-              --region ${{ env.AWS_REGION }} || {
-              echo "::error::Service $ECS_SERVICE failed to stabilize within 10 minutes"
-              echo "::group::Service Details"
-              aws ecs describe-services \
-                --cluster $CLUSTER_NAME \
-                --services $ECS_SERVICE \
-                --region ${{ env.AWS_REGION }} \
-                --query 'services[0]' \
-                --output json
+            # Wait with timeout (max 5 minutes per service)
+            if timeout 300 kubectl rollout status deployment/$SERVICE_NAME \
+              -n team-${{ env.TEAM_NAME }} \
+              --timeout=5m; then
+              echo "::notice::✅ Deployment $SERVICE_NAME rolled out successfully"
+            else
+              echo "::warning::Deployment $SERVICE_NAME did not complete within timeout"
+              echo "::group::Deployment Status"
+              kubectl describe deployment $SERVICE_NAME -n team-${{ env.TEAM_NAME }}
               echo "::endgroup::"
               
-              echo "::group::Task Details"
-              TASK_ARNS=$(aws ecs list-tasks \
-                --cluster $CLUSTER_NAME \
-                --service-name $ECS_SERVICE \
-                --region ${{ env.AWS_REGION }} \
-                --query 'taskArns' \
-                --output text)
-              
-              if [ ! -z "$TASK_ARNS" ]; then
-                aws ecs describe-tasks \
-                  --cluster $CLUSTER_NAME \
-                  --tasks $TASK_ARNS \
-                  --region ${{ env.AWS_REGION }} \
-                  --output json
-              fi
+              echo "::group::Pod Status"
+              kubectl get pods -n team-${{ env.TEAM_NAME }} -l app=$SERVICE_NAME
+              kubectl describe pods -n team-${{ env.TEAM_NAME }} -l app=$SERVICE_NAME
               echo "::endgroup::"
               
-              echo "::warning::Continuing with deployment despite timeout..."
-            }
-            
-            echo "::notice::✅ $ECS_SERVICE is stable"
+              echo "::group::Pod Logs"
+              kubectl logs -n team-${{ env.TEAM_NAME }} -l app=$SERVICE_NAME --tail=50 || true
+              echo "::endgroup::"
+            fi
           done
           echo "::endgroup::"
 
@@ -649,39 +312,38 @@ jobs:
         run: |
           echo "::group::All Services Status"
           SERVICE_COUNT=${{ env.SERVICE_COUNT }}
-          CLUSTER_NAME="hackathon-cluster"
+          
+          echo "::notice::Namespace: team-${{ env.TEAM_NAME }}"
+          echo ""
           
           for i in $(seq 0 $((SERVICE_COUNT - 1))); do
             SERVICE_NAME=$(printenv SERVICE_${i}_NAME)
-            ECS_SERVICE="hackathon-${{ env.TEAM_NAME }}-$SERVICE_NAME"
             
             echo "::group::Status: $SERVICE_NAME"
-            aws ecs describe-services \
-              --cluster $CLUSTER_NAME \
-              --services $ECS_SERVICE \
-              --region ${{ env.AWS_REGION }} \
-              --query 'services[0].{Status:status,DesiredCount:desiredCount,RunningCount:runningCount,PendingCount:pendingCount}' \
-              --output table
             
-            TASK_ARNS=$(aws ecs list-tasks \
-              --cluster $CLUSTER_NAME \
-              --service-name $ECS_SERVICE \
-              --region ${{ env.AWS_REGION }} \
-              --query 'taskArns[0:3]' \
-              --output text)
+            echo "Deployment:"
+            kubectl get deployment $SERVICE_NAME -n team-${{ env.TEAM_NAME }} -o wide || echo "Deployment not found"
+            echo ""
             
-            if [ ! -z "$TASK_ARNS" ]; then
-              aws ecs describe-tasks \
-                --cluster $CLUSTER_NAME \
-                --tasks $TASK_ARNS \
-                --region ${{ env.AWS_REGION }} \
-                --query 'tasks[*].{TaskArn:taskArn,Status:lastStatus,Health:healthStatus,Started:startedAt}' \
-                --output table
-            else
-              echo "No tasks found"
-            fi
+            echo "Pods:"
+            kubectl get pods -n team-${{ env.TEAM_NAME }} -l app=$SERVICE_NAME -o wide || echo "No pods found"
+            echo ""
+            
+            echo "Service:"
+            kubectl get service $SERVICE_NAME -n team-${{ env.TEAM_NAME }} -o wide || echo "Service not found"
+            echo ""
+            
+            echo "Ingress:"
+            kubectl get ingress $SERVICE_NAME -n team-${{ env.TEAM_NAME }} -o wide || echo "Ingress not found"
+            echo ""
+            
             echo "::endgroup::"
           done
+          
+          echo "::group::All Resources in Namespace"
+          kubectl get all -n team-${{ env.TEAM_NAME }}
+          echo "::endgroup::"
+          
           echo "::endgroup::"
 
       - name: Deployment summary
@@ -693,26 +355,44 @@ jobs:
           echo "================================================"
           echo "Team Name: ${{ env.TEAM_NAME }}"
           echo "Services Deployed: ${{ env.SERVICE_COUNT }}"
-          echo "ECS Cluster: hackathon-cluster"
+          echo "EKS Cluster: ${{ env.EKS_CLUSTER_NAME }}"
+          echo "Namespace: team-${{ env.TEAM_NAME }}"
+          echo "Commit SHA: ${{ github.sha }}"
           echo "================================================"
           echo "Deployed Services:"
           
           SERVICE_COUNT=${{ env.SERVICE_COUNT }}
           for i in $(seq 0 $((SERVICE_COUNT - 1))); do
             SERVICE_NAME=$(printenv SERVICE_${i}_NAME)
+            
+            # Determine URL based on service name
+            case "$SERVICE_NAME" in
+              *frontend*|*app*)
+                SERVICE_URL="https://app.${{ env.TEAM_NAME }}.bp.elmhakathon.com"
+                ;;
+              *backend*|*api*)
+                SERVICE_URL="https://api.${{ env.TEAM_NAME }}.bp.elmhakathon.com"
+                ;;
+              *)
+                SERVICE_URL="https://$SERVICE_NAME.${{ env.TEAM_NAME }}.bp.elmhakathon.com"
+                ;;
+            esac
+            
             echo "  - $SERVICE_NAME"
-            echo "    ECS Service: hackathon-${{ env.TEAM_NAME }}-$SERVICE_NAME"
-            echo "    URL: https://$SERVICE_NAME.${{ env.TEAM_NAME }}.bp.elmhakathon.com"
+            echo "    Deployment: $SERVICE_NAME"
+            echo "    Namespace: team-${{ env.TEAM_NAME }}"
+            echo "    URL: $SERVICE_URL"
           done
           
           echo "================================================"
-          echo "Team Base URL: https://${{ env.TEAM_NAME }}.bp.elmhakathon.com"
+          echo "Team Base Domain: ${{ env.TEAM_NAME }}.bp.elmhakathon.com"
           echo "================================================"
           echo "::endgroup::"
           
           if [ "${{ job.status }}" == "success" ]; then
             echo "::notice::✅ Deployment successful for team ${{ env.TEAM_NAME }}"
-            echo "::notice::🌐 Team Base: https://${{ env.TEAM_NAME }}.bp.elmhakathon.com"
+            echo "::notice::🚀 EKS Cluster: ${{ env.EKS_CLUSTER_NAME }}"
+            echo "::notice::📦 Namespace: team-${{ env.TEAM_NAME }}"
           else
             echo "::error::❌ Deployment failed for team ${{ env.TEAM_NAME }}"
           fi

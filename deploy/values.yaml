@@ -1,0 +1,144 @@
+# Default values for hackathon-service
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+# Team name (kebab-case) - REQUIRED
+teamName: "expo-1st"
+
+# Service configuration
+service:
+  name: "api"
+  port: 3000
+  type: ClusterIP
+
+# Container configuration
+image:
+  registry: "060795935816.dkr.ecr.ap-southeast-1.amazonaws.com"
+  repository: "hackathon-expo-1st"
+  tag: "latest"
+  pullPolicy: Always
+
+# Container port
+containerPort: 3000
+
+# Deployment configuration
+replicaCount: 2
+
+resources:
+  requests:
+    memory: "256Mi"
+    cpu: "250m"
+  limits:
+    memory: "512Mi"
+    cpu: "500m"
+
+# Ingress configuration
+ingress:
+  enabled: true
+  className: "alb"
+  hostname: "api.expo-1st.bp.elmhakathon.com"
+  
+  # Health check configuration
+  healthCheck:
+    path: "/"
+    intervalSeconds: 15
+    timeoutSeconds: 5
+    healthyThreshold: 2
+    unhealthyThreshold: 2
+    successCodes: "200,404"
+  
+  annotations:
+    alb.ingress.kubernetes.io/scheme: "internet-facing"
+    alb.ingress.kubernetes.io/target-type: "ip"
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+
+# Certificate ARN mapping by team name
+# Use: ./scripts/get-cert-arn.sh <team-name> to get the ARN
+certArnTeamMapping:
+  expo-1st: "arn:aws:acm:ap-southeast-1:060795935816:certificate/7adebf0f-5199-4510-8a02-f0a4c85c2354"
+  heros: "arn:aws:acm:ap-southeast-1:060795935816:certificate/PLACEHOLDER"
+  rollingstars: "arn:aws:acm:ap-southeast-1:060795935816:certificate/PLACEHOLDER"
+  elm-tech: "arn:aws:acm:ap-southeast-1:060795935816:certificate/PLACEHOLDER"
+  itjehaat-sooq: "arn:aws:acm:ap-southeast-1:060795935816:certificate/PLACEHOLDER"
+  supernovas: "arn:aws:acm:ap-southeast-1:060795935816:certificate/PLACEHOLDER"
+  automind-squad: "arn:aws:acm:ap-southeast-1:060795935816:certificate/PLACEHOLDER"
+  naqliyat: "arn:aws:acm:ap-southeast-1:060795935816:certificate/PLACEHOLDER"
+  agent-x: "arn:aws:acm:ap-southeast-1:060795935816:certificate/PLACEHOLDER"
+  product-boosters: "arn:aws:acm:ap-southeast-1:060795935816:certificate/PLACEHOLDER"
+  altahateeh: "arn:aws:acm:ap-southeast-1:060795935816:certificate/PLACEHOLDER"
+  sema-lab: "arn:aws:acm:ap-southeast-1:060795935816:certificate/PLACEHOLDER"
+  logisty: "arn:aws:acm:ap-southeast-1:060795935816:certificate/PLACEHOLDER"
+  smart: "arn:aws:acm:ap-southeast-1:060795935816:certificate/PLACEHOLDER"
+  marzas: "arn:aws:acm:ap-southeast-1:060795935816:certificate/PLACEHOLDER"
+  qimmah: "arn:aws:acm:ap-southeast-1:060795935816:certificate/PLACEHOLDER"
+  huic-team: "arn:aws:acm:ap-southeast-1:060795935816:certificate/PLACEHOLDER"
+  elm-product: "arn:aws:acm:ap-southeast-1:060795935816:certificate/PLACEHOLDER"
+  bpo: "arn:aws:acm:ap-southeast-1:060795935816:certificate/PLACEHOLDER"
+
+# Environment variables
+env: []
+# Example:
+# env:
+#   - name: NODE_ENV
+#     value: "production"
+#   - name: DB_HOST
+#     value: "postgres"
+
+# Secrets (use Kubernetes secrets)
+envFromSecrets: []
+# Example:
+# envFromSecrets:
+#   - secretName: "app-secrets"
+
+# ConfigMaps
+envFromConfigMaps: []
+# Example:
+# envFromConfigMaps:
+#   - configMapName: "app-config"
+
+# Probes
+livenessProbe:
+  enabled: true
+  httpGet:
+    path: /health
+    port: 3000
+  initialDelaySeconds: 30
+  periodSeconds: 10
+
+readinessProbe:
+  enabled: true
+  httpGet:
+    path: /health
+    port: 3000
+  initialDelaySeconds: 5
+  periodSeconds: 5
+
+# Persistent storage
+persistence:
+  enabled: false
+  storageClass: "gp3"
+  accessMode: ReadWriteOnce
+  size: 10Gi
+  mountPath: /data
+  subPath: ""
+
+# Service Account
+serviceAccount:
+  create: false
+  name: ""
+  annotations: {}
+
+# Pod annotations
+podAnnotations: {}
+
+# Pod labels
+podLabels: {}
+
+# Node selector
+nodeSelector: {}
+
+# Tolerations
+tolerations: []
+
+# Affinity
+affinity: {}

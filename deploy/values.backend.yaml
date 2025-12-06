@@ -1,0 +1,71 @@
+# Backend API service configuration example
+# Override with: helm template -f deploy/values.backend.yaml
+
+teamName: "expo-1st"
+
+service:
+  name: "backend"
+  port: 80
+  type: ClusterIP
+
+image:
+  registry: "060795935816.dkr.ecr.ap-southeast-1.amazonaws.com"
+  repository: "hackathon-expo-1st"
+  tag: "latest"
+  pullPolicy: Always
+
+containerPort: 3000
+
+replicaCount: 3
+
+resources:
+  requests:
+    memory: "256Mi"
+    cpu: "250m"
+  limits:
+    memory: "512Mi"
+    cpu: "500m"
+
+ingress:
+  enabled: true
+  className: "alb"
+  hostname: "api.expo-1st.bp.elmhakathon.com"
+  
+  healthCheck:
+    path: "/health"
+    intervalSeconds: 15
+    timeoutSeconds: 5
+    healthyThreshold: 2
+    unhealthyThreshold: 2
+    successCodes: "200,404"
+
+env:
+  - name: PORT
+    value: "3000"
+  - name: NODE_ENV
+    value: "production"
+
+envFromSecrets:
+  - secretName: "app-secrets"
+
+envFromConfigMaps:
+  - configMapName: "app-config"
+
+livenessProbe:
+  enabled: true
+  httpGet:
+    path: /health
+    port: 3000
+  initialDelaySeconds: 30
+  periodSeconds: 10
+
+readinessProbe:
+  enabled: true
+  httpGet:
+    path: /health
+    port: 3000
+  initialDelaySeconds: 5
+  periodSeconds: 5
+
+persistence:
+  enabled: false

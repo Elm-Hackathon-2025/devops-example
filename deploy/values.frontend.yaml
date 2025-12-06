@@ -1,0 +1,53 @@
+# Frontend service configuration example
+# Override with: helm template -f deploy/values.frontend.yaml
+
+teamName: "expo-1st"
+
+service:
+  name: "frontend"
+  port: 80
+  type: ClusterIP
+
+image:
+  registry: "060795935816.dkr.ecr.ap-southeast-1.amazonaws.com"
+  repository: "hackathon-expo-1st-frontend"
+  tag: "latest"
+  pullPolicy: Always
+
+containerPort: 8080
+
+replicaCount: 2
+
+resources:
+  requests:
+    memory: "128Mi"
+    cpu: "100m"
+  limits:
+    memory: "256Mi"
+    cpu: "250m"
+
+ingress:
+  enabled: true
+  className: "alb"
+  hostname: "app.expo-1st.bp.elmhakathon.com"
+  
+  healthCheck:
+    path: "/"
+    intervalSeconds: 15
+    timeoutSeconds: 5
+    healthyThreshold: 2
+    unhealthyThreshold: 2
+    successCodes: "200,404"
+
+env:
+  - name: BACKEND_URL
+    value: "https://api.expo-1st.bp.elmhakathon.com"
+
+livenessProbe:
+  enabled: false
+
+readinessProbe:
+  enabled: false
+
+persistence:
+  enabled: false
