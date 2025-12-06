@@ -196,14 +196,17 @@ jobs:
           echo "::endgroup::"
 
       - name: Configure kubectl for EKS
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
         run: |
           echo "::group::Configuring kubectl for EKS"
           echo "::notice::Updating kubeconfig for cluster: ${{ env.EKS_CLUSTER_NAME }}"
           aws eks update-kubeconfig \
             --name ${{ env.EKS_CLUSTER_NAME }} \
             --region ${{ env.AWS_REGION }}
-          
-          sleep 4  # Wait for kubeconfig to be ready
+          sleep 3  # Wait for kubeconfig to be ready
           echo "::notice::Verifying connection to cluster..."
           kubectl cluster-info
           kubectl get nodes
@@ -218,6 +221,10 @@ jobs:
           echo "::endgroup::"
 
       - name: Deploy All Services to EKS with Helm
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
         run: |
           echo "::group::Deploying Services to EKS"
           SERVICE_COUNT=${{ env.SERVICE_COUNT }}
@@ -277,6 +284,10 @@ jobs:
           echo "::endgroup::"
 
       - name: Wait for All Deployments to Roll Out
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
         run: |
           echo "::group::Waiting for Deployments to Roll Out"
           SERVICE_COUNT=${{ env.SERVICE_COUNT }}
@@ -310,6 +321,10 @@ jobs:
           echo "::endgroup::"
 
       - name: Get All Services Status
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
         run: |
           echo "::group::All Services Status"
           SERVICE_COUNT=${{ env.SERVICE_COUNT }}
