@@ -133,14 +133,15 @@ jobs:
               echo "::notice::Building with docker compose..."
               docker compose -f ${{ steps.detect-services.outputs.file }} build $SERVICE_NAME
               
-              # Get the built image name
+              # Get the built image name (convert to lowercase for Docker compatibility)
               COMPOSE_PROJECT="${PWD##*/}"
               COMPOSE_IMAGE="${COMPOSE_PROJECT}-${SERVICE_NAME}"
+              COMPOSE_IMAGE_LOWER=$(echo "$COMPOSE_IMAGE" | tr '[:upper:]' '[:lower:]')
               
-              echo "::notice::Tagging image: $COMPOSE_IMAGE -> $IMAGE_TAG"
-              docker tag $COMPOSE_IMAGE $IMAGE_TAG
-              docker tag $COMPOSE_IMAGE $IMAGE_TAG_REPO
-              docker tag $COMPOSE_IMAGE $IMAGE_TAG_SHA
+              echo "::notice::Tagging image: $COMPOSE_IMAGE_LOWER -> $IMAGE_TAG"
+              docker tag $COMPOSE_IMAGE_LOWER $IMAGE_TAG
+              docker tag $COMPOSE_IMAGE_LOWER $IMAGE_TAG_REPO
+              docker tag $COMPOSE_IMAGE_LOWER $IMAGE_TAG_SHA
             else
               echo "::notice::Building with Dockerfile..."
               docker build \
