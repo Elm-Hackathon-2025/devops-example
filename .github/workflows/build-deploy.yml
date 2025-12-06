@@ -245,19 +245,8 @@ jobs:
               echo "::notice::Using service-specific values: $VALUES_FILE"
             fi
             
-            # Determine ingress hostname based on service name
-            case "$SERVICE_NAME" in
-              *frontend*|*app*)
-                HOSTNAME="app.${{ env.TEAM_NAME }}.bp.elmhakathon.com"
-                ;;
-              *backend*|*api*)
-                HOSTNAME="api.${{ env.TEAM_NAME }}.bp.elmhakathon.com"
-                ;;
-              *)
-                HOSTNAME="$SERVICE_NAME.${{ env.TEAM_NAME }}.bp.elmhakathon.com"
-                ;;
-            esac
-            
+            # Set ingress hostname: {service}.{team}.bp.elmhakathon.com
+            HOSTNAME="$SERVICE_NAME.${{ env.TEAM_NAME }}.bp.elmhakathon.com"
             echo "::notice::Ingress hostname: $HOSTNAME"
             
             # Deploy with Helm template + kubectl apply
@@ -379,24 +368,20 @@ jobs:
           SERVICE_COUNT=${{ env.SERVICE_COUNT }}
           for i in $(seq 0 $((SERVICE_COUNT - 1))); do
             SERVICE_NAME=$(printenv SERVICE_${i}_NAME)
-            
-            # Determine URL based on service name
-            case "$SERVICE_NAME" in
-              *frontend*|*app*)
-                SERVICE_URL="https://app.${{ env.TEAM_NAME }}.bp.elmhakathon.com"
-                ;;
-              *backend*|*api*)
-                SERVICE_URL="https://api.${{ env.TEAM_NAME }}.bp.elmhakathon.com"
-                ;;
-              *)
-                SERVICE_URL="https://$SERVICE_NAME.${{ env.TEAM_NAME }}.bp.elmhakathon.com"
-                ;;
-            esac
+            SERVICE_URL="https://$SERVICE_NAME.${{ env.TEAM_NAME }}.bp.elmhakathon.com"
             
             echo "  - $SERVICE_NAME"
             echo "    Deployment: $SERVICE_NAME"
             echo "    Namespace: team-${{ env.TEAM_NAME }}"
             echo "    URL: $SERVICE_URL"
+            echo ""
+          done
+          
+          echo "================================================"
+          echo "Access URLs:"
+          for i in $(seq 0 $((SERVICE_COUNT - 1))); do
+            SERVICE_NAME=$(printenv SERVICE_${i}_NAME)
+            echo "  🌐 https://$SERVICE_NAME.${{ env.TEAM_NAME }}.bp.elmhakathon.com"
           done
           
           echo "================================================"
