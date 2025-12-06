@@ -226,6 +226,16 @@ jobs:
           SERVICE_COUNT=${{ env.SERVICE_COUNT }}
           ECR_REGISTRY="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
           
+          # Check if Chart.yaml has dependencies and update them
+          if [ -f "deploy/Chart.yaml" ]; then
+            if grep -q "^dependencies:" deploy/Chart.yaml; then
+              echo "::notice::Chart has dependencies, running helm dependency update..."
+              helm dependency update deploy/
+            else
+              echo "::notice::No dependencies found in Chart.yaml"
+            fi
+          fi
+          
           for i in $(seq 0 $((SERVICE_COUNT - 1))); do
             SERVICE_NAME=$(printenv SERVICE_${i}_NAME)
             ECR_REPO=$(printenv SERVICE_${i}_ECR_REPO)
