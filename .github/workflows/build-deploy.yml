@@ -203,6 +203,7 @@ jobs:
             --name ${{ env.EKS_CLUSTER_NAME }} \
             --region ${{ env.AWS_REGION }}
           
+          sleep 4  # Wait for kubeconfig to be ready
           echo "::notice::Verifying connection to cluster..."
           kubectl cluster-info
           kubectl get nodes
