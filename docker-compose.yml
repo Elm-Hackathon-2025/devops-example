@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   # Backend API Service
-  api:
+  test-api:
     build:
       context: .
       dockerfile: Dockerfile.node
@@ -23,7 +23,7 @@ services:
       retries: 3
 
   # Frontend Service
-  frontend:
+  test-frontend:
     build:
       context: .
       dockerfile: Dockerfile.frontend

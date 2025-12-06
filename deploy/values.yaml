@@ -2,24 +2,21 @@
 # This is a YAML-formatted file.
 # Declare variables to be passed into your templates.
 
+# =============================================================================
+# TEAM CONFIGURATION - UPDATE THESE VALUES
+# =============================================================================
+
 # Team name (kebab-case) - REQUIRED
 teamName: "expo-1st"
+
+# Container port - must match your application's listening port
+containerPort: 3000
 
 # Service configuration
 service:
   name: "api"
   port: 3000
   type: ClusterIP
-
-# Container configuration
-image:
-  registry: "060795935816.dkr.ecr.ap-southeast-1.amazonaws.com"
-  repository: "hackathon-expo-1st"
-  tag: "latest"
-  pullPolicy: Always
-
-# Container port
-containerPort: 3000
 
 # Deployment configuration
 replicaCount: 2
@@ -142,3 +139,14 @@ tolerations: []
 
 # Affinity
 affinity: {}
+
+# =============================================================================
+# PIPELINE CONFIGURATION - DO NOT EDIT (Set via --set in CI/CD)
+# =============================================================================
+
+# Container configuration - automatically set by pipeline
+image:
+  registry: "060795935816.dkr.ecr.ap-southeast-1.amazonaws.com"
+  repository: "hackathon-expo-1st"
+  tag: "latest"
+  pullPolicy: Always

@@ -100,34 +100,13 @@ jobs:
           echo "::notice::Found $SERVICE_COUNT service(s) to build and deploy"
           
           for i in $(seq 0 $((SERVICE_COUNT - 1))); do
-            COMPOSE_SERVICE_NAME=$(echo $SERVICES | jq -r ".[$i]")
-            echo "::group::Processing compose service: $COMPOSE_SERVICE_NAME"
+            SERVICE_NAME=$(echo $SERVICES | jq -r ".[$i]")
+            echo "::group::Processing service: $SERVICE_NAME"
             
-            # Map compose service names to deployment service names
-            # By default, prefix with "test-" to match docker-compose SERVICE_NAME env vars
-            case "$COMPOSE_SERVICE_NAME" in
-              api)
-                SERVICE_NAME="test-api"
-                ;;
-              frontend)
-                SERVICE_NAME="test-frontend"
-                ;;
-              *)
-                # For other services, check if there's a SERVICE_NAME env var
-                SERVICE_NAME=$(docker compose -f ${{ steps.detect-services.outputs.file }} config 2>/dev/null | \
-                  grep -A 30 "  $COMPOSE_SERVICE_NAME:" | \
-                  grep "SERVICE_NAME" | \
-                  grep -oE 'test-[a-zA-Z0-9_-]+' | \
-                  head -1)
-                # If not found, use compose service name as-is
-                if [ -z "$SERVICE_NAME" ]; then
-                  SERVICE_NAME="$COMPOSE_SERVICE_NAME"
-                fi
-                ;;
-            esac
+            # Use docker-compose service name directly (no mapping)
+            # Teams should name their services as: test-api, test-frontend, test-worker, etc.
             
-            echo "::notice::Compose service: $COMPOSE_SERVICE_NAME"
-            echo "::notice::Deployment service name: $SERVICE_NAME"
+            echo "::notice::Service name: $SERVICE_NAME"
             
             # ECR repository format: hackathon-{team_name}-{service_name}
             ECR_REPO="hackathon-${{ env.TEAM_NAME }}-$SERVICE_NAME"
@@ -152,11 +131,11 @@ jobs:
             # Build based on method
             if [ "$BUILD_METHOD" == "compose" ]; then
               echo "::notice::Building with docker compose..."
-              docker compose -f ${{ steps.detect-services.outputs.file }} build $COMPOSE_SERVICE_NAME
+              docker compose -f ${{ steps.detect-services.outputs.file }} build $SERVICE_NAME
               
               # Get the built image name
               COMPOSE_PROJECT="${PWD##*/}"
-              COMPOSE_IMAGE="${COMPOSE_PROJECT}-${COMPOSE_SERVICE_NAME}"
+              COMPOSE_IMAGE="${COMPOSE_PROJECT}-${SERVICE_NAME}"
               
               echo "::notice::Tagging image: $COMPOSE_IMAGE -> $IMAGE_TAG"
               docker tag $COMPOSE_IMAGE $IMAGE_TAG
@@ -184,7 +163,6 @@ jobs:
             
             # Store service info for deployment step
             echo "SERVICE_${i}_NAME=$SERVICE_NAME" >> $GITHUB_ENV
-            echo "SERVICE_${i}_COMPOSE_NAME=$COMPOSE_SERVICE_NAME" >> $GITHUB_ENV
             echo "SERVICE_${i}_ECR_REPO=$ECR_REPO" >> $GITHUB_ENV
             echo "SERVICE_${i}_IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
             
@@ -250,17 +228,15 @@ jobs:
           
           for i in $(seq 0 $((SERVICE_COUNT - 1))); do
             SERVICE_NAME=$(printenv SERVICE_${i}_NAME)
-            COMPOSE_SERVICE_NAME=$(printenv SERVICE_${i}_COMPOSE_NAME)
             ECR_REPO=$(printenv SERVICE_${i}_ECR_REPO)
             
             echo "::group::Deploying service: $SERVICE_NAME"
-            echo "::notice::Compose service: $COMPOSE_SERVICE_NAME"
-            echo "::notice::K8s service name: $SERVICE_NAME"
+            echo "::notice::Service name: $SERVICE_NAME"
             echo "::notice::ECR repository: $ECR_REPO"
             echo "::notice::Image tag: ${{ github.sha }}"
             
             # Check if service-specific values file exists
-            VALUES_FILE="deploy/values.${COMPOSE_SERVICE_NAME}.yaml"
+            VALUES_FILE="deploy/values.${SERVICE_NAME}.yaml"
             if [ ! -f "$VALUES_FILE" ]; then
               echo "::warning::Service-specific values file not found: $VALUES_FILE"
               echo "::notice::Using default values.yaml with overrides"
@@ -286,13 +262,18 @@ jobs:
             
             # Deploy with Helm template + kubectl apply
             echo "::notice::Rendering Helm template and applying to cluster..."
+            
+            # Image tag format: {SERVICE_NAME}-{COMMIT_SHA}
+            IMAGE_TAG="${SERVICE_NAME}-${{ github.sha }}"
+            echo "::notice::Using image tag: $IMAGE_TAG"
+            
             helm template $SERVICE_NAME ./deploy \
               -f $VALUES_FILE \
               --set teamName=${{ env.TEAM_NAME }} \
               --set service.name=$SERVICE_NAME \
               --set image.registry=$ECR_REGISTRY \
               --set image.repository=$ECR_REPO \
-              --set image.tag=${{ github.sha }} \
+              --set image.tag=$IMAGE_TAG \
               --set ingress.hostname=$HOSTNAME | kubectl apply -f -
             
             echo "::notice::✅ Deployed $SERVICE_NAME to namespace team-${{ env.TEAM_NAME }}"
