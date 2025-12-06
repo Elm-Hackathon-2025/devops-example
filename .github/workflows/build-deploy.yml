@@ -202,11 +202,29 @@ jobs:
           AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
         run: |
           echo "::group::Configuring kubectl for EKS"
+          
+          # Verify AWS credentials are working
+          echo "::notice::Verifying AWS credentials..."
+          aws sts get-caller-identity
+          
+          # Test EKS access
+          echo "::notice::Testing EKS API access..."
+          aws eks describe-cluster --name ${{ env.EKS_CLUSTER_NAME }} --region ${{ env.AWS_REGION }} --query 'cluster.name'
+          
           echo "::notice::Updating kubeconfig for cluster: ${{ env.EKS_CLUSTER_NAME }}"
           aws eks update-kubeconfig \
             --name ${{ env.EKS_CLUSTER_NAME }} \
             --region ${{ env.AWS_REGION }}
-          sleep 3  # Wait for kubeconfig to be ready
+          
+          # Debug: Show kubeconfig (without sensitive data)
+          echo "::notice::Kubeconfig created, verifying configuration..."
+          kubectl config view --minify | head -20
+          
+          # Test kubectl authentication directly
+          echo "::notice::Testing kubectl auth with aws eks get-token..."
+          aws eks get-token --cluster-name ${{ env.EKS_CLUSTER_NAME }} --region ${{ env.AWS_REGION }} | jq -r '.status.token' | head -c 50
+          echo "... (token truncated)"
+          
           echo "::notice::Verifying connection to cluster..."
           kubectl cluster-info
           kubectl get nodes
