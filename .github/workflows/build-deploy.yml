@@ -266,14 +266,14 @@ jobs:
             IMAGE_TAG="${SERVICE_NAME}-${{ github.sha }}"
             echo "::notice::Using image tag: $IMAGE_TAG"
             
-            helm template $SERVICE_NAME ./deploy \
+            helm -n team-${{ env.TEAM_NAME }} template $SERVICE_NAME ./deploy \
               -f $VALUES_FILE \
               --set teamName=${{ env.TEAM_NAME }} \
               --set service.name=$SERVICE_NAME \
               --set image.registry=$ECR_REGISTRY \
               --set image.repository=$ECR_REPO \
               --set image.tag=$IMAGE_TAG \
-              --set ingress.hostname=$HOSTNAME | kubectl apply -f -
+              --set ingress.hostname=$HOSTNAME | kubectl -n team-${{ env.TEAM_NAME }} apply -f -
             
             echo "::notice::✅ Deployed $SERVICE_NAME to namespace team-${{ env.TEAM_NAME }}"
             echo "::notice::🌐 URL: https://$HOSTNAME"
